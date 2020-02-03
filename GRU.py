@@ -3,6 +3,15 @@ import torch.nn as nn
 from torch.autograd import Variable
 
 
+def repackage_hidden(h):
+    """Wraps hidden states in new Tensors, to detach them from their history."""
+
+    if isinstance(h, torch.Tensor):
+        return h.detach()
+    else:
+        return tuple(repackage_hidden(v) for v in h)
+
+
 ######################################################################
 # https://github.com/happyjin/ConvGRU-pytorch/blob/master/convGRU.py #
 # My modification: (1)
@@ -191,7 +200,7 @@ class ConvGRU(nn.Module):
 
                 h, processed_input, context_raw, reconstruction, instant_pred, long_term_pred = \
                     self.cell_list[layer_idx](input_tensor=cur_layer_input[:, t, :, :, :],  # (b,t,c,h,w)
-                                              h_cur=h)
+                                              h_cur=repackage_hidden(h))
                 output_inner.append(h)
 
                 if layer_idx == 0:

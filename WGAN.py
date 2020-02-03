@@ -391,29 +391,30 @@ class WGAN_GP(object):
         progress = ProgressBar(total_batch_num, fmt=ProgressBar.FULL)
         print("Started time:", datetime.datetime.now())
 
-        # get data info for each whole video
-        for video_idx, clip_indices in dataloader:
-            output_reconst, output_instant, output_longterm = [], [], []
+        with torch.no_grad():
+            # get data info for each whole video
+            for video_idx, clip_indices in dataloader:
+                output_reconst, output_instant, output_longterm = [], [], []
 
-            # evaluate a batch
-            for clip_idx in clip_indices:
-                assert len(clip_idx) == 2
-                imgs = dataset.data[video_idx][clip_idx[0]:clip_idx[1]]
-                imgs.unsqueeze_(0)
-                imgs = imgs.to(self.device)
-                _, _, _, out_reconstruction, out_instant_pred, out_longterm_pred = self.G(imgs[:, :-1])  # skip last frame
+                # evaluate a batch
+                for clip_idx in clip_indices:
+                    assert len(clip_idx) == 2
+                    imgs = dataset.data[video_idx][clip_idx[0]:clip_idx[1]]
+                    imgs.unsqueeze_(0)
+                    imgs = imgs.to(self.device)
+                    _, _, _, out_reconstruction, out_instant_pred, out_longterm_pred = self.G(imgs[:, :-1])  # skip last frame
 
-                # store results
-                output_reconst.append(out_reconstruction[0])
-                output_instant.append(out_instant_pred[0])
-                output_longterm.append(out_longterm_pred[0])
+                    # store results
+                    output_reconst.append(out_reconstruction[0])
+                    output_instant.append(out_instant_pred[0])
+                    output_longterm.append(out_longterm_pred[0])
 
-                progress.current += 1
-                progress()
+                    progress.current += 1
+                    progress()
 
-            results_reconst.append(torch.cat(output_reconst, dim=0))
-            results_instant.append(torch.cat(output_instant, dim=0))
-            results_longterm.append(torch.cat(output_longterm, dim=0))
+                results_reconst.append(torch.cat(output_reconst, dim=0))
+                results_instant.append(torch.cat(output_instant, dim=0))
+                results_longterm.append(torch.cat(output_longterm, dim=0))
 
         progress.done()
         print("Finished time:", datetime.datetime.now())

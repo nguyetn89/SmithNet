@@ -408,11 +408,11 @@ class DatasetDefiner():
 
     # set attributes related to each dataset
     def _set_dataset_attributes(self):
-        if self._name == "UCSDPed2":
+        if self._name == "UCSDped2":
             self._n_clip_train = 16
             self._n_clip_test = 12
-            self._training_path = "../../../Anomaly detection/UCSD_Anomaly_Dataset.v1p2/UCSDped2/Train"
-            self._evaluation_path = "../../../Anomaly detection/UCSD_Anomaly_Dataset.v1p2/UCSDped2/Test"
+            self._training_path = "./datasets/UCSD_Anomaly_Dataset.v1p2/UCSDped2/Train"
+            self._evaluation_path = "./datasets/UCSD_Anomaly_Dataset.v1p2/UCSDped2/Test"
             self._eval_groundtruth_frames = [(61, 180), (95, 180), (1, 146), (31, 180), (1, 129),
                                              (1, 159), (46, 180), (1, 180), (1, 120), (1, 150), (1, 180), (88, 180)]
             self._eval_groundtruth_clips = np.arange(12)
@@ -423,7 +423,7 @@ class DatasetDefiner():
             self._evaluation_path = "./dataset/just4test/test"
             self._eval_groundtruth_frames = [(61, 180), (95, 180)]
             self._eval_groundtruth_clips = np.arange(2)
-        elif self._name == "UCSDPed1":
+        elif self._name == "UCSDped1":
             self._n_clip_train = None
             self._n_clip_test = None
             self._training_path = ""
@@ -480,7 +480,7 @@ class DatasetDefiner():
             self._eval_groundtruth_frames = None
             self._eval_groundtruth_clips = None
         else:
-            raise ValueError("Unknown dataset: %s" % self.name)
+            raise ValueError("Unknown dataset: %s" % self._name)
         assert len(self._eval_groundtruth_clips) == len(self._eval_groundtruth_frames)
 
 
