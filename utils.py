@@ -13,6 +13,8 @@ import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score, roc_curve
 from collections import OrderedDict
 
+from CONFIG import data_info
+
 mean = torch.tensor([0.485, 0.456, 0.406])
 std = torch.tensor([0.229, 0.224, 0.225])
 
@@ -409,79 +411,16 @@ class DatasetDefiner():
 
     # set attributes related to each dataset
     def _set_dataset_attributes(self):
-        if self._name == "UCSDped2":
-            self._n_clip_train = 16
-            self._n_clip_test = 12
-            self._training_path = "./datasets/UCSD_Anomaly_Dataset.v1p2/UCSDped2/Train"
-            self._evaluation_path = "./datasets/UCSD_Anomaly_Dataset.v1p2/UCSDped2/Test"
-            self._eval_groundtruth_frames = [(61, 180), (95, 180), (1, 146), (31, 180), (1, 129),
-                                             (1, 159), (46, 180), (1, 180), (1, 120), (1, 150), (1, 180), (88, 180)]
-            self._eval_groundtruth_clips = np.arange(12)
-        elif self._name == "just4test":
-            self._n_clip_train = 2
-            self._n_clip_test = 1
-            self._training_path = "./dataset/just4test/train"
-            self._evaluation_path = "./dataset/just4test/test"
-            self._eval_groundtruth_frames = [(61, 180)]
-            self._eval_groundtruth_clips = np.arange(1)
-        elif self._name == "UCSDped1":
-            self._n_clip_train = None
-            self._n_clip_test = None
-            self._training_path = ""
-            self._evaluation_path = ""
-            self._eval_groundtruth_frames = None
-            self._eval_groundtruth_clips = None
-        elif self._name == "Avenue":
-            self._n_clip_train = None
-            self._n_clip_test = None
-            self._training_path = ""
-            self._evaluation_path = ""
-            self._eval_groundtruth_frames = None
-            self._eval_groundtruth_clips = None
-        elif self._name == "Entrance":
-            self._n_clip_train = None
-            self._n_clip_test = None
-            self._training_path = ""
-            self._evaluation_path = ""
-            self._eval_groundtruth_frames = None
-            self._eval_groundtruth_clips = None
-        elif self._name == "Exit":
-            self._n_clip_train = None
-            self._n_clip_test = None
-            self._training_path = ""
-            self._evaluation_path = ""
-            self._eval_groundtruth_frames = None
-            self._eval_groundtruth_clips = None
-        elif self._name == "Shanghai":
-            self._n_clip_train = None
-            self._n_clip_test = None
-            self._training_path = ""
-            self._evaluation_path = ""
-            self._eval_groundtruth_frames = None
-            self._eval_groundtruth_clips = None
-        elif self._name == "Crime":
-            self._n_clip_train = None
-            self._n_clip_test = None
-            self._training_path = ""
-            self._evaluation_path = ""
-            self._eval_groundtruth_frames = None
-            self._eval_groundtruth_clips = None
-        elif self._name == "Belleview":
-            self._n_clip_train = None
-            self._n_clip_test = None
-            self._training_path = ""
-            self._evaluation_path = ""
-            self._eval_groundtruth_frames = None
-            self._eval_groundtruth_clips = None
-        elif self._name == "Train":
-            self._n_clip_train = None
-            self._n_clip_test = None
-            self._training_path = ""
-            self._evaluation_path = ""
-            self._eval_groundtruth_frames = None
-            self._eval_groundtruth_clips = None
+        if self._name in data_info:
+            info = data_info[self._name]
+            self._n_clip_train = info["n_clip_train"]
+            self._n_clip_test = info["n_clip_test"]
+            self._training_path = info["training_path"]
+            self._evaluation_path = info["evaluation_path"]
+            self._eval_groundtruth_frames = info["eval_groundtruth_frames"]
+            self._eval_groundtruth_clips = info["eval_groundtruth_clips"]
         else:
-            raise ValueError("Unknown dataset: %s" % self._name)
+            raise ValueError("Unknown dataset")
         assert len(self._eval_groundtruth_clips) == len(self._eval_groundtruth_frames)
 
 

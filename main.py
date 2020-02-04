@@ -51,7 +51,8 @@ def run(store_path, params, mode=("train", "infer", "eval")):
         if "epoch_eval" in params:
             epoch_eval = params["epoch_eval"]
             AUCs = controller.evaluate(epoch_eval)
-            print(AUCs)
+            print("Epoch", epoch_eval)
+            print("AUCs:", AUCs)
         else:
             print("ERROR: epoch for evaluation not found => skip evaluation stage!")
 
@@ -87,4 +88,4 @@ def run_UCSDped2(store_path):
 
 
 if __name__ == "__main__":
-    run_just4test("./workspace")
+    run_UCSDped2("./workspace")
