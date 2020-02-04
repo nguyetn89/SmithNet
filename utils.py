@@ -395,8 +395,9 @@ class DatasetDefiner():
         for clip_idx in range(len(self._eval_groundtruth_clips)):
             anomaly_intervals = self._eval_groundtruth_frames[clip_idx]
             for i in range(len(anomaly_intervals)//2):
-                start = anomaly_intervals[2*i]
-                end = anomaly_intervals[2*i+1]
+                # -1 because _eval_groundtruth_frames given in 1-based index
+                start = anomaly_intervals[2*i] - 1
+                end = anomaly_intervals[2*i+1] - 1
                 groundtruths[clip_idx][start:end] = 1
         # flatten groundtruth and predicted scores for evaluation
         true_results = np.concatenate(groundtruths, axis=0)
@@ -421,8 +422,8 @@ class DatasetDefiner():
             self._n_clip_test = 1
             self._training_path = "./dataset/just4test/train"
             self._evaluation_path = "./dataset/just4test/test"
-            self._eval_groundtruth_frames = [(61, 180), (95, 180)]
-            self._eval_groundtruth_clips = np.arange(2)
+            self._eval_groundtruth_frames = [(61, 180)]
+            self._eval_groundtruth_clips = np.arange(1)
         elif self._name == "UCSDped1":
             self._n_clip_train = None
             self._n_clip_test = None

@@ -67,7 +67,7 @@ def run_just4test(store_path):
         "every_epochs": 1,
         "epoch_eval": 1
     }
-    mode = ("train", "infer", "eval")
+    mode = ("-train", "-infer", "eval")
     run(store_path, params, mode)
 
 
@@ -87,4 +87,4 @@ def run_UCSDped2(store_path):
 
 
 if __name__ == "__main__":
-    run_UCSDped2("./workspace")
+    run_just4test("./workspace")

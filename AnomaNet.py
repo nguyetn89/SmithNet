@@ -5,8 +5,17 @@ import torch.nn.functional as F
 #####################################
 
 from Semantic import SemanticNet as SemaNet
-from GRU import ConvGRU
+from GRU import ConvGRUCell
 from utils import get_img_shape
+
+
+def repackage_hidden(h):
+    """Wraps hidden states in new Tensors, to detach them from their history."""
+
+    if isinstance(h, torch.Tensor):
+        return h.detach()
+    else:
+        return tuple(repackage_hidden(v) for v in h)
 
 
 class BasicConv2d(nn.Module):
@@ -230,76 +239,55 @@ class AnomaNet(nn.Module):
 
         # Long-term prediction
         # D(i) -> (RNN)
+        hidden_channel = 256
         RNN_input_size = (self.IM_SIZE[0]//8, self.IM_SIZE[1]//8)
-        RNN_in_channel = n_channel_out_Inception
-        RNN_hidden_channel = [256, 256, 256]
-        RNN_kernel_size = (3, 3)
-        RNN_num_layer = len(RNN_hidden_channel)
-        self.RNN = ConvGRU(input_size=RNN_input_size,
-                           input_channel=RNN_in_channel,
-                           hidden_channel=RNN_hidden_channel,
-                           kernel_size=RNN_kernel_size,
-                           num_layers=RNN_num_layer,
-                           device=self.device,
-                           batch_first=True,
-                           bias=True,
-                           return_all_layers=False,
-                           preprocess=self.frame_to_RNN,
-                           postprocess=self.RNN_to_frame)
+        self.RNN = ConvGRUCell(input_size=RNN_input_size,
+                               input_channel=n_channel_out_Inception,
+                               hidden_channel=hidden_channel,
+                               kernel_size=(3, 3),
+                               bias=True)
+        self.RNN_hidden = torch.autograd.Variable(torch.zeros(1, hidden_channel, RNN_input_size[0], RNN_input_size[1])).to(self.device)
 
         # (RNN) -> F'(i+1)
-        C_out = RNN_hidden_channel[-1]
-        self.RNN_out = nn.Sequential(nn.ConvTranspose2d(C_out, C_out, kernel_size=2, stride=2, padding=0),
-                                     nn.Conv2d(C_out, C_out//2, kernel_size=3, stride=1, padding=1),
-                                     nn.BatchNorm2d(num_features=C_out//2),
-                                     nn.LeakyReLU(negative_slope=0.2),  # end block 1
-                                     nn.ConvTranspose2d(C_out//2, C_out//2, kernel_size=2, stride=2, padding=0),
-                                     nn.Conv2d(C_out//2, C_out//4, kernel_size=3, stride=1, padding=1),
-                                     nn.BatchNorm2d(num_features=C_out//4),
-                                     nn.LeakyReLU(negative_slope=0.2),  # end block 2
-                                     nn.ConvTranspose2d(C_out//4, C_out//4, kernel_size=2, stride=2, padding=0),
-                                     nn.Conv2d(C_out//4, 3, kernel_size=3, stride=1, padding=1),
-                                     # nn.BatchNorm2d(num_features=C_enc),
-                                     # nn.LeakyReLU(negative_slope=0.2)) #end block 3
-                                     nn.Tanh())
+        C_out = hidden_channel
+        self.post_RNN = nn.Sequential(nn.ConvTranspose2d(C_out, C_out, kernel_size=2, stride=2, padding=0),
+                                      nn.Conv2d(C_out, C_out//2, kernel_size=3, stride=1, padding=1),
+                                      nn.BatchNorm2d(num_features=C_out//2),
+                                      nn.LeakyReLU(negative_slope=0.2),  # end block 1
+                                      nn.ConvTranspose2d(C_out//2, C_out//2, kernel_size=2, stride=2, padding=0),
+                                      nn.Conv2d(C_out//2, C_out//4, kernel_size=3, stride=1, padding=1),
+                                      nn.BatchNorm2d(num_features=C_out//4),
+                                      nn.LeakyReLU(negative_slope=0.2),  # end block 2
+                                      nn.ConvTranspose2d(C_out//4, C_out//4, kernel_size=2, stride=2, padding=0),
+                                      nn.Conv2d(C_out//4, 3, kernel_size=3, stride=1, padding=1),
+                                      nn.Tanh())
         self.to(self.device)
         #
         if prt_summary:
             print("Original input size:", self.IM_SIZE)
-            print("RNN input size:     ", RNN_input_size)
+            print("RNN input size:     ", (self.RNN.height, self.RNN.width))
 
-    def frame_to_RNN(self, X):
+    # input_tensor: shape (b, c, h, w)
+    def forward(self, x):
         # context
-        X_context_raw = self.context_raw(X)
-        X_context_fine = self.context_1x1conv(X_context_raw)
-        # encoding & decoding
-        X_latent = self.frame_enc(X)
-        X_hat = self.frame_dec(X_latent)
+        x_context_raw = self.context_raw(x)
+        x_context_fine = self.context_1x1conv(x_context_raw)
+        # encoding and decoding
+        x_latent = self.frame_enc(x)
+        x_reconst = self.frame_dec(x_latent)
         # description from (context, encoding)
-        X_description = self.description(torch.cat((X_latent, X_context_fine), dim=1))
+        x_description = self.description(torch.cat((x_latent, x_context_fine), dim=1))
         # instant prediction
-        X_expandSE_1 = self.instant_dec_1(X_description)
-        X_expandSE_2 = self.instant_dec_2(X_expandSE_1)
-        X_instant_pred = self.instant_dec_3(X_expandSE_2)
-        return X_description, X_context_raw, X_hat, X_instant_pred
-
-    def RNN_to_frame(self, X):
-        return self.RNN_out(X)
-
-    def forward(self, X):
-        X_layer_output_RNN, _, X_description, X_context, X_reconstruction, X_instant_pred, X_long_term_pred = self.RNN(X)
-        X_out = X_layer_output_RNN[-1]
-        return X_out, X_description, X_context, X_reconstruction, X_instant_pred, X_long_term_pred
-
-
-# config0 = {"instance_pred": 1, "long_term_pred": 1,
-#            "instance_concat_before_RNN": 1, "instance_concat_after_RNN": 0, "residual_before_after_RNN": 0}
-
-# class NetCreator(nn.Module):
-#     def __init__(self, config):
-#         pass
-#
-#     def forward(self, X):
-#         pass
-
-#################################################################
+        x_expandSE_1 = self.instant_dec_1(x_description)
+        x_expandSE_2 = self.instant_dec_2(x_expandSE_1)
+        x_instant_pred = self.instant_dec_3(x_expandSE_2)
+        # RNN
+        RNN_output = torch.autograd.Variable(torch.zeros(x.size(0), self.RNN.get_attribute("hidden_channel"),
+                                             self.RNN.get_attribute("height"), self.RNN.get_attribute("width"))).to(self.device)
+        for i in range(x.size(0)):
+            self.RNN_hidden = repackage_hidden(self.RNN_hidden)
+            self.RNN_hidden = self.RNN(torch.unsqueeze(x_description[i], 0), self.RNN_hidden)
+            RNN_output[i] = self.RNN_hidden.data
+        x_long_term_pred = self.post_RNN(RNN_output)
+        #
+        return x_context_raw, x_reconst, x_instant_pred, x_long_term_pred
