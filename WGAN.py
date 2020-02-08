@@ -233,23 +233,19 @@ class WGAN_GP(object):
 
                     # load batch data
                     assert len(clip_index) == 2
-                    imgs = dataset.data[video_idx][clip_index[0]:clip_index[1]]
-                    imgs.unsqueeze_(0)
-                    imgs = imgs.to(self.device)
+                    imgs = dataset.data[video_idx][clip_index[0]:clip_index[1]].to(self.device)
 
                     # train discriminator with real images
-                    real_D_input = torch.cat([imgs[0, :-1], imgs[0, 1:], imgs[0, 1:]], dim=1)
+                    real_D_input = torch.cat([imgs[:-1], imgs[1:], imgs[1:]], dim=1)
                     d_loss_real = self.D(real_D_input)
                     d_loss_real = d_loss_real.mean()
                     d_loss_real.backward(minus_one, retain_graph=True)
 
                     # get fake outputs from Generator
-                    _, _, in_context, out_reconstruction, out_instant_pred, out_longterm_pred = self.G(imgs[:, :-1])  # skip last frame
-                    # using only 1 batch of 5D tensor (1, B, C, H, W) => normalize to 4D
-                    in_context, out_reconstruction, out_instant_pred, out_longterm_pred = \
-                        in_context[0], out_reconstruction[0], out_instant_pred[0], out_longterm_pred[0]
+                    in_context, out_reconstruction, out_instant_pred, out_longterm_pred = self.G(imgs)
+
                     # train discriminator with fake images
-                    fake_D_input = torch.cat([imgs[0, :-1], out_instant_pred, out_longterm_pred], dim=1)
+                    fake_D_input = torch.cat([imgs[:-1], out_instant_pred[:-1], out_longterm_pred[:-1]], dim=1)
                     d_loss_fake = self.D(fake_D_input)
                     d_loss_fake = d_loss_fake.mean()
                     d_loss_fake.backward(one, retain_graph=True)
@@ -273,32 +269,32 @@ class WGAN_GP(object):
                     g_loss.backward(minus_one, retain_graph=True)
 
                     # groundtruth context
-                    gt_context = self.ContextNet(imgs[0])
+                    gt_context = self.ContextNet(imgs)
 
                     # define loss functions, may be different for partial losses
                     L2_loss, L1_loss = nn.MSELoss(), nn.L1Loss()
 
                     # context loss
-                    context_loss = L2_loss(in_context, gt_context[:-1])
+                    context_loss = L2_loss(in_context, gt_context)
 
                     # prediction losses
-                    dx_instant_pred, dy_instant_pred = image_gradient(out_instant_pred, out_abs=True)
-                    dx_longterm_pred, dy_longterm_pred = image_gradient(out_longterm_pred, out_abs=True)
-                    dx_input, dy_input = image_gradient(imgs[0, 1:], out_abs=True)
-                    instant_loss = L2_loss(out_instant_pred, imgs[0, 1:]) + \
+                    dx_instant_pred, dy_instant_pred = image_gradient(out_instant_pred[:-1], out_abs=True)
+                    dx_longterm_pred, dy_longterm_pred = image_gradient(out_longterm_pred[:-1], out_abs=True)
+                    dx_input, dy_input = image_gradient(imgs[1:], out_abs=True)
+                    instant_loss = L2_loss(out_instant_pred[:-1], imgs[1:]) + \
                         L1_loss(dx_instant_pred, dx_input) + L1_loss(dy_instant_pred, dy_input)
-                    longterm_loss = L2_loss(out_longterm_pred, imgs[0, 1:]) + \
+                    longterm_loss = L2_loss(out_longterm_pred[:-1], imgs[1:]) + \
                         L1_loss(dx_longterm_pred, dx_input) + L1_loss(dy_longterm_pred, dy_input)
 
                     # reconstruction loss
-                    dx_recons_pred, dy_recons_pred = image_gradient(out_reconstruction, out_abs=True)
-                    dx_input, dy_input = image_gradient(imgs[0, :-1], out_abs=True)
-                    reconst_loss = L2_loss(out_reconstruction, imgs[0, :-1]) + \
+                    dx_recons_pred, dy_recons_pred = image_gradient(out_reconstruction[:-1], out_abs=True)
+                    dx_input, dy_input = image_gradient(imgs[:-1], out_abs=True)
+                    reconst_loss = L2_loss(out_reconstruction[:-1], imgs[:-1]) + \
                         L1_loss(dx_recons_pred, dx_input) + L1_loss(dy_recons_pred, dy_input)
 
                     # total loss
                     loss_weights = {"context": 1, "reconst": 1, "instant": 1, "longterm": 1}
-                    g_loss_total = 0*g_loss + loss_weights["context"]*context_loss + loss_weights["reconst"]*reconst_loss + \
+                    g_loss_total = 1*g_loss + loss_weights["context"]*context_loss + loss_weights["reconst"]*reconst_loss + \
                         loss_weights["instant"]*instant_loss + loss_weights["longterm"]*longterm_loss
 
                     g_loss_total.backward()
@@ -338,16 +334,16 @@ class WGAN_GP(object):
                                  "D_optim_epoch_%s.pkl" % str(epoch + 1).zfill(LEN_ZFILL))
 
                 # Denormalize images and save them in grid 8x8
-                images_to_save = [[tensor_restore(imgs.data.cpu()[0][0]),
+                images_to_save = [[tensor_restore(imgs.data.cpu()[0]),
                                    tensor_restore(out_reconstruction.data.cpu()[0]),
-                                   tensor_restore(imgs.data.cpu()[0][1]),
+                                   tensor_restore(imgs.data.cpu()[1]),
                                    tensor_restore(out_instant_pred.data.cpu()[0]),
                                    tensor_restore(out_longterm_pred.data.cpu()[0])],
-                                  [tensor_restore(imgs.data.cpu()[0][-2]),
-                                   tensor_restore(out_reconstruction.data.cpu()[-1]),
-                                   tensor_restore(imgs.data.cpu()[0][-1]),
-                                   tensor_restore(out_instant_pred.data.cpu()[-1]),
-                                   tensor_restore(out_longterm_pred.data.cpu()[-1])]]
+                                  [tensor_restore(imgs.data.cpu()[-2]),
+                                   tensor_restore(out_reconstruction.data.cpu()[-2]),
+                                   tensor_restore(imgs.data.cpu()[-1]),
+                                   tensor_restore(out_instant_pred.data.cpu()[-2]),
+                                   tensor_restore(out_longterm_pred.data.cpu()[-2])]]
                 print([x.shape for x in images_to_save[0]], [x.shape for x in images_to_save[1]])
                 images_to_save = [utils.make_grid(images, nrow=1) for images in images_to_save]
                 grid = utils.make_grid(images_to_save, nrow=2)
@@ -399,15 +395,13 @@ class WGAN_GP(object):
                 # evaluate a batch
                 for clip_idx in clip_indices:
                     assert len(clip_idx) == 2
-                    imgs = dataset.data[video_idx][clip_idx[0]:clip_idx[1]]
-                    imgs.unsqueeze_(0)
-                    imgs = imgs.to(self.device)
-                    _, _, _, out_reconstruction, out_instant_pred, out_longterm_pred = self.G(imgs[:, :-1])  # skip last frame
+                    imgs = dataset.data[video_idx][clip_idx[0]:clip_idx[1]].to(self.device)
+                    _, out_reconstruction, out_instant_pred, out_longterm_pred = self.G(imgs)
 
                     # store results
-                    output_reconst.append(out_reconstruction[0])
-                    output_instant.append(out_instant_pred[0])
-                    output_longterm.append(out_longterm_pred[0])
+                    output_reconst.append(out_reconstruction)
+                    output_instant.append(out_instant_pred)
+                    output_longterm.append(out_longterm_pred)
 
                     progress.current += 1
                     progress()
@@ -437,10 +431,12 @@ class WGAN_GP(object):
             assert power in (1, 2) and patch_size % 2
             # combine channels
             tensor2 = torch.sum(torch.abs(tensor) if power == 1 else tensor**2, dim=1)
+            tensor2.unsqueeze_(1)
             # convolution for most salient patch
             weight = torch.ones(1, 1, patch_size, patch_size)
             padding = patch_size // 2
-            heatmaps = [F.conv2d(item, weight, stride=1, padding=padding).cpu().numpy() for item in tensor2]
+            # heatmaps = [F.conv2d(item, weight, stride=1, padding=padding).numpy() for item in tensor2]
+            heatmaps = F.conv2d(tensor2, weight, stride=1, padding=padding).numpy()
             # get sum value and position of the patch
             scores = [np.max(heatmap) for heatmap in heatmaps]
             positions = [np.where(heatmap == np.max(heatmap)) for heatmap in heatmaps]
@@ -465,9 +461,9 @@ class WGAN_GP(object):
         # evaluation
         assert len(eval_data_list) == len(reconst_list) == len(instant_list) == len(longterm_list)
         # torch.tensor([torch.max(score) for score in torch.abs(out_reconstruction[0] - imgs[0, :-1])])
-        reconst_diff = [reconst_list[i] - eval_data_list[i][:-1] for i in range(len(eval_data_list))]
-        instant_diff = [instant_list[i] - eval_data_list[i][1:] for i in range(len(eval_data_list))]
-        longterm_diff = [longterm_list[i] - eval_data_list[i][1:] for i in range(len(eval_data_list))]
+        reconst_diff = [reconst_list[i][:-1].cpu() - eval_data_list[i][:-1].cpu() for i in range(len(eval_data_list))]
+        instant_diff = [instant_list[i][:-1].cpu() - eval_data_list[i][1:].cpu() for i in range(len(eval_data_list))]
+        longterm_diff = [longterm_list[i][:-1].cpu() - eval_data_list[i][1:].cpu() for i in range(len(eval_data_list))]
 
         # compute patch scores and localize positions -> list of dicts
         # temporary: get only scores
