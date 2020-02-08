@@ -4,6 +4,7 @@ import torch
 
 from WGAN import WGAN_GP
 from NoGan import NoGAN
+from DCGAN import DCGAN
 
 
 # set seed values
@@ -23,14 +24,16 @@ def run(store_path, params, mode=("train", "infer", "eval")):
     assert isinstance(mode, (tuple, list))
     # parse parameters
     method = params["method"]
-    assert method in ("WGAN", "NoGAN")
+    assert method in ("WGAN", "NoGAN", "DCGAN")
     dataset = params["dataset"]
     im_size = params["im_size"]
     # init model
     if method == "WGAN":
         controller = WGAN_GP(dataset, im_size, store_path)
-    else:
+    elif method == "NoGAN":
         controller = NoGAN(dataset, im_size, store_path)
+    else:
+        controller = DCGAN(dataset, im_size, store_path)
     #
     if "train" in mode:
         epoch_start = params["epoch_start"] if "epoch_start" in params else 0            # default: start from 0
@@ -74,18 +77,18 @@ def run_just4test(store_path):
 
 def run_UCSDped2(store_path):
     params = {
-        "method": "WGAN",
+        "method": "DCGAN",
         "dataset": "UCSDped2",
         "im_size": (192, 288),
         "epoch_start": 0,
-        "epoch_end": 2,
-        "batch_size": 64,
-        "every_epochs": 2,
-        "epoch_eval": 2
+        "epoch_end": 80,
+        "batch_size": 4,
+        "every_epochs": 20,
+        "epoch_eval": 80
     }
     mode = ("train", "infer", "eval")
     run(store_path, params, mode)
 
 
 if __name__ == "__main__":
-    run_UCSDped2("./workspace")
+    run_UCSDped2("./workspace_DCGAN_context")

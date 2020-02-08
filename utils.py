@@ -390,7 +390,7 @@ class DatasetDefiner():
 
     # clip_results: sequence of anomaly scores (clips) for the whole test set
     # clip_results must be an array of arrays (either numpy or torch tensor)
-    def evaluate(self, clip_results):
+    def evaluate(self, clip_results, normalize_each_clip=True):
         assert len(clip_results) == self._n_clip_test
         groundtruths = [np.zeros_like(clip_result) for clip_result in clip_results]
         # set frame-level groundtruth scores
@@ -401,6 +401,9 @@ class DatasetDefiner():
                 start = anomaly_intervals[2*i] - 1
                 end = anomaly_intervals[2*i+1] - 1
                 groundtruths[clip_idx][start:end] = 1
+            if normalize_each_clip:
+                clip_results[clip_idx] = \
+                    (clip_results[clip_idx] - min(clip_results[clip_idx]))/(max(clip_results[clip_idx]) - min(clip_results[clip_idx]))
         # flatten groundtruth and predicted scores for evaluation
         true_results = np.concatenate(groundtruths, axis=0)
         pred_results = np.concatenate(clip_results, axis=0)

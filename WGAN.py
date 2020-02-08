@@ -294,7 +294,7 @@ class WGAN_GP(object):
 
                     # total loss
                     loss_weights = {"context": 1, "reconst": 1, "instant": 1, "longterm": 1}
-                    g_loss_total = 0*g_loss + loss_weights["context"]*context_loss + loss_weights["reconst"]*reconst_loss + \
+                    g_loss_total = 1*g_loss + loss_weights["context"]*context_loss + loss_weights["reconst"]*reconst_loss + \
                         loss_weights["instant"]*instant_loss + loss_weights["longterm"]*longterm_loss
 
                     g_loss_total.backward()

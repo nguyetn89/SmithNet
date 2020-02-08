@@ -1,5 +1,7 @@
 import numpy as np
 
+loss_weights = {"g_loss": 0.25, "context": 0.5, "reconst": 1, "instant": 1, "longterm": 1}
+
 UCSDped2 = {
     "n_clip_train": 16,
     "n_clip_test": 12,
