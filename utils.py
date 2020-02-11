@@ -11,6 +11,7 @@ import torchvision.transforms as transforms
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score, roc_curve
+from scipy.io import loadmat
 from collections import OrderedDict
 
 from CONFIG import data_info
@@ -264,6 +265,7 @@ def summary(model, input_size, batch_size=-1, device="cuda", print_details=False
 # batch_size: number of frames feeding into network for each propagation
 class DataHelper(torch.utils.data.Dataset):
     def __init__(self, name, im_size, in_path, out_file=None, default_ext=".avi", batch_size=24):
+        assert out_file is None or (isinstance(out_file, str) and out_file[-3:] == ".pt")
         super(DataHelper, self).__init__()
         # set name and data path
         self.name = name
@@ -271,38 +273,42 @@ class DataHelper(torch.utils.data.Dataset):
         self.out_file = out_file
 
         # load data in the provided path
-        print("Processing data path: '%s'..." % in_path)
-        if in_path[-3:] == ".pt" or (out_file is not None and out_file[:-3] == ".pt"):  # data processed and saved in single file
-            self.data = torch.load(in_path)
-        else:                   # load ensemble of single files
-            extensions = [".pt", "/", ".*"]
-            if default_ext not in extensions:
-                extensions.insert(0, default_ext)
-            ext = None
-            for tmp_ext in extensions:
-                template = in_path + "/*" + tmp_ext
-                data_paths = sorted(glob.glob(template))
-                if len(data_paths) > 0:
-                    ext = tmp_ext
-                    break
-            if ext is None:
-                print("ERROR: data files not found!")
-                return
-            if ext == ".pt":    # data from .pt files
-                self.data = [torch.load(data_path) for data_path in data_paths]
-            elif ext == "/":    # load images in multiple directories
-                self.data = [torch.stack([tensor_normalize(datum)
-                             for datum in load_imgs_in_directory(data_path, "*", im_size)]) for data_path in data_paths]
-            else:               # load all videos in the specified path
-                self.data = [torch.stack([tensor_normalize(datum) for datum in load_video(data_path, im_size)]) for data_path in data_paths]
+        if out_file is not None and os.path.exists(out_file):
+            self.data = torch.load(out_file)  # data processed and saved in single file
+            print("Data loaded from '%s'..." % out_file)
+        else:
+            print("Processing data path: '%s'..." % in_path)
+            if in_path[-3:] == ".pt":
+                self.data = torch.load(in_path)
+            else:                   # load ensemble of single files
+                extensions = [".pt", "/", ".*"]
+                if default_ext not in extensions:
+                    extensions.insert(0, default_ext)
+                ext = None
+                for tmp_ext in extensions:
+                    template = in_path + "/*" + tmp_ext
+                    data_paths = sorted(glob.glob(template))
+                    if len(data_paths) > 0:
+                        ext = tmp_ext
+                        break
+                if ext is None:
+                    print("ERROR: data files not found!")
+                    return
+                if ext == ".pt":    # data from .pt files
+                    self.data = [torch.load(data_path) for data_path in data_paths]
+                elif ext == "/":    # load images in multiple directories
+                    self.data = [torch.stack([tensor_normalize(datum)
+                                 for datum in load_imgs_in_directory(data_path, "*", im_size)]) for data_path in data_paths]
+                else:               # load all videos in the specified path
+                    self.data = [torch.stack([tensor_normalize(datum) for datum in load_video(data_path, im_size)]) for data_path in data_paths]
 
-            # set directory for storing preprocessed data files
-            if out_file is not None:
-                out_path, _ = os.path.split(out_file)
-                if not os.path.exists(out_path):
-                    os.makedirs(out_path)
-                # storing data file
-                torch.save(self.data, out_file)
+                # set directory for storing preprocessed data files
+                if out_file is not None:
+                    out_path, _ = os.path.split(out_file)
+                    if not os.path.exists(out_path):
+                        os.makedirs(out_path)
+                    # storing data file
+                    torch.save(self.data, out_file)
 
         # set default batch_size
         self.set_batch_size(batch_size)
@@ -424,6 +430,13 @@ class DatasetDefiner():
             self._eval_groundtruth_clips = info["eval_groundtruth_clips"]
         else:
             raise ValueError("Unknown dataset")
+
+        # specify frame-level groundtruth for some datasets
+        if self._name == "Avenue":
+            self._eval_groundtruth_frames = \
+                load_groundtruth_Avenue(self._evaluation_path + "/../testing_gt", self._n_clip_test)
+
+        # done
         assert len(self._eval_groundtruth_clips) == len(self._eval_groundtruth_frames)
 
 
@@ -461,3 +474,34 @@ class ProgressBar(object):
         self.current = self.total
         self()
         print('', file=self.output)
+
+
+# groundtruth-related functions
+
+def load_groundtruth_Avenue(path, n_clip):
+
+    # get two ends of anomalous events
+    def find_ends(seq):
+        tmp = np.insert(seq, 0, -10)
+        diff = tmp[1:] - tmp[:-1]
+        peaks = np.where(diff != 1)[0]
+        #
+        ret = np.empty((len(peaks), 2), dtype=int)
+        for i in range(len(ret)):
+            ret[i] = [peaks[i], (peaks[i+1]-1) if i < len(ret)-1 else (len(seq)-1)]
+        return ret
+
+    # get indices of two ends of anomalous events
+    def get_segments(seq):
+        ends = find_ends(seq)
+        return np.array([[seq[curr_end[0]], seq[curr_end[1]]] for curr_end in ends]).reshape(-1) + 1  # +1 for 1-based index (same as UCSD data)
+
+    groundtruth = []
+    for i in range(n_clip):
+        filename = '%s/%d_label.mat' % (path, i + 1)
+        # print(filename)
+        data = loadmat(filename)['volLabel']
+        n_bin = np.array([np.sum(data[0, i]) for i in range(len(data[0]))])
+        abnormal_frames = np.where(n_bin > 0)[0]
+        groundtruth.append(get_segments(abnormal_frames))
+    return groundtruth

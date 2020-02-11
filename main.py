@@ -90,5 +90,21 @@ def run_UCSDped2(store_path):
     run(store_path, params, mode)
 
 
+def run_Avenue(store_path):
+    params = {
+        "method": "DCGAN",
+        "dataset": "Avenue",
+        "im_size": (128, 192),
+        "epoch_start": 0,
+        "epoch_end": 40,
+        "batch_size": 4,
+        "every_epochs": 10,
+        "epoch_eval": 40
+    }
+    mode = ("train", "infer", "eval")
+    run(store_path, params, mode)
+
+
 if __name__ == "__main__":
-    run_UCSDped2("./workspace_DCGAN_context")
+    # run_UCSDped2("./workspace_DCGAN_context")
+    run_Avenue("./workspace_DCGAN_context_fixedNet")

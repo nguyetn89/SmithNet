@@ -173,7 +173,7 @@ class DCGAN(object):
             for video_idx, clip_indices in dataloader:
 
                 # zero grad for generator due to RNN
-                self.G.zero_grad()
+                # self.G.zero_grad()
 
                 #
                 d_loss_real, d_loss_fake = 0, 0
@@ -242,7 +242,7 @@ class DCGAN(object):
                     g_loss_total = loss_weights["g_loss"]*g_loss + loss_weights["context"]*context_loss + \
                         loss_weights["reconst"]*reconst_loss + loss_weights["instant"]*instant_loss + loss_weights["longterm"]*longterm_loss
 
-                    self.D.zero_grad()
+                    self.G.zero_grad()
                     g_loss_total.backward()
                     self.g_optimizer.step()
 

@@ -31,12 +31,12 @@ UCSDped1 = {
 }
 
 Avenue = {
-    "n_clip_train": None,
-    "n_clip_test": None,
-    "training_path": None,
-    "evaluation_path": None,
+    "n_clip_train": 16,
+    "n_clip_test": 21,
+    "training_path": "./datasets/Avenue_Dataset/training_videos",
+    "evaluation_path": "./datasets/Avenue_Dataset/testing_videos",
     "eval_groundtruth_frames": None,
-    "eval_groundtruth_clips": None
+    "eval_groundtruth_clips": np.arange(21)
 }
 
 Entrance = {

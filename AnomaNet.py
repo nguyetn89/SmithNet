@@ -221,20 +221,25 @@ class AnomaNet(nn.Module):
 
         # Instant prediction
         # D(i) -> F'(i+1)
+        # (h/8, w/8) -> (h/2, w/2)
         self.instant_dec_1 = nn.Sequential(nn.ConvTranspose2d(n_channel_out_Inception, 8*C_enc, kernel_size=2, stride=2, padding=0),
                                            nn.Conv2d(8*C_enc, 4*C_enc, kernel_size=3, stride=1, padding=1),
                                            nn.BatchNorm2d(num_features=4*C_enc),
                                            nn.LeakyReLU(negative_slope=0.2),  # end block 1
                                            nn.ConvTranspose2d(4*C_enc, 4*C_enc, kernel_size=2, stride=2, padding=0),
                                            ExpandedSE(4*C_enc, self.IM_SIZE[0]//2, self.IM_SIZE[1]//2, case="both"))  # expanded SE
+        C_out_inst_dec_1 = 4 * C_enc
+
+        # (h/2, w/2) -> (h, w)
         self.instant_dec_2 = nn.Sequential(nn.Conv2d(4*C_enc, 2*C_enc, kernel_size=3, stride=1, padding=1),
                                            nn.BatchNorm2d(num_features=2*C_enc),
                                            nn.LeakyReLU(negative_slope=0.2),  # end block 2
                                            nn.ConvTranspose2d(2*C_enc, 2*C_enc, kernel_size=2, stride=2, padding=0),
                                            ExpandedSE(2*C_enc, self.IM_SIZE[0], self.IM_SIZE[1], case="both"))  # expanded SE
+        C_out_inst_dec_2 = 2 * C_enc
+
+        # instant prediction result
         self.instant_dec_3 = nn.Sequential(nn.Conv2d(2*C_enc, 3, kernel_size=3, stride=1, padding=1),
-                                           # nn.BatchNorm2d(num_features=C_enc),
-                                           # nn.LeakyReLU(negative_slope=0.2)) #end block 3
                                            nn.Tanh())
 
         # Long-term prediction
@@ -250,17 +255,21 @@ class AnomaNet(nn.Module):
 
         # (RNN) -> F'(i+1)
         C_out = hidden_channel
-        self.post_RNN = nn.Sequential(nn.ConvTranspose2d(C_out, C_out, kernel_size=2, stride=2, padding=0),
-                                      nn.Conv2d(C_out, C_out//2, kernel_size=3, stride=1, padding=1),
-                                      nn.BatchNorm2d(num_features=C_out//2),
-                                      nn.LeakyReLU(negative_slope=0.2),  # end block 1
-                                      nn.ConvTranspose2d(C_out//2, C_out//2, kernel_size=2, stride=2, padding=0),
-                                      nn.Conv2d(C_out//2, C_out//4, kernel_size=3, stride=1, padding=1),
-                                      nn.BatchNorm2d(num_features=C_out//4),
-                                      nn.LeakyReLU(negative_slope=0.2),  # end block 2
-                                      nn.ConvTranspose2d(C_out//4, C_out//4, kernel_size=2, stride=2, padding=0),
-                                      nn.Conv2d(C_out//4, 3, kernel_size=3, stride=1, padding=1),
-                                      nn.Tanh())
+
+        # (h/8, w/8) -> (h/2, w/2)
+        self.post_RNN_1 = nn.Sequential(nn.ConvTranspose2d(C_out, C_out, kernel_size=2, stride=2, padding=0),
+                                        nn.Conv2d(C_out, C_out//2, kernel_size=3, stride=1, padding=1),
+                                        nn.BatchNorm2d(num_features=C_out//2),
+                                        nn.LeakyReLU(negative_slope=0.2),  # end block 1
+                                        nn.ConvTranspose2d(C_out//2, C_out//2, kernel_size=2, stride=2, padding=0))
+        # (h/2, w/2) -> (h, w)
+        self.post_RNN_2 = nn.Sequential(nn.Conv2d(C_out//2 + C_out_inst_dec_1, C_out//4, kernel_size=3, stride=1, padding=1),
+                                        nn.BatchNorm2d(num_features=C_out//4),
+                                        nn.LeakyReLU(negative_slope=0.2),  # end block 2
+                                        nn.ConvTranspose2d(C_out//4, C_out//4, kernel_size=2, stride=2, padding=0))
+        # longterm prediction result
+        self.post_RNN_3 = nn.Sequential(nn.Conv2d(C_out//4 + C_out_inst_dec_2, 3, kernel_size=3, stride=1, padding=1),
+                                        nn.Tanh())
         self.to(self.device)
         #
         if prt_summary:
@@ -288,6 +297,8 @@ class AnomaNet(nn.Module):
             self.RNN_hidden = repackage_hidden(self.RNN_hidden)
             self.RNN_hidden = self.RNN(torch.unsqueeze(x_description[i], 0), self.RNN_hidden)
             RNN_output[i] = self.RNN_hidden.data
-        x_long_term_pred = self.post_RNN(RNN_output)
+        x_post_RNN_1 = self.post_RNN_1(RNN_output)
+        x_post_RNN_2 = self.post_RNN_2(torch.cat((x_post_RNN_1, x_expandSE_1), dim=1))
+        x_long_term_pred = self.post_RNN_3(torch.cat((x_post_RNN_2, x_expandSE_2), dim=1))
         #
         return x_context_raw, x_reconst, x_instant_pred, x_long_term_pred
