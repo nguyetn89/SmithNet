@@ -54,7 +54,7 @@ class Discriminator(nn.Module):
         frame, pred_instant, pred_longterm = torch.split(X, 3, dim=1)
         prob_instant = self.output(self.network(torch.cat([frame, pred_instant], dim=1)))
         prob_longterm = self.output(self.network(torch.cat([frame, pred_longterm], dim=1)))
-        return prob_instant * prob_longterm
+        return 0.5 * (prob_instant + prob_longterm)
 
 
 # name: dataset's name
@@ -64,9 +64,12 @@ class DCGAN(object):
         self.im_size = im_size
         # paths
         self.store_path = os.path.join(store_path, self.name)
-        self.input_store_path = self.store_path + "/inputs"             # data for training and evaluation
-        self.training_data_file = os.path.join(self.input_store_path, self.name + "_training.pt")
-        self.evaluation_data_file = os.path.join(self.input_store_path, self.name + "_evaluation.pt")
+        self.input_store_path = self.store_path + "/input_data_%s_%s" \
+            % (str(self.im_size[0]).zfill(3), str(self.im_size[1]).zfill(3))  # data for training and evaluation
+        self.training_store_path = self.input_store_path + "/training"
+        self.evaluation_store_path = self.input_store_path + "/evaluation"
+        # self.training_data_file = os.path.join(self.input_store_path, self.name + "_training.pt")
+        # self.evaluation_data_file = os.path.join(self.input_store_path, self.name + "_evaluation.pt")
         self.model_store_path = self.store_path + "/models"             # trained models
         self.gen_image_store_path = self.store_path + "/gen_images"     # generated images (for visual checking)
         self.output_store_path = self.store_path + "/outputs"           # outputs for evaluation
@@ -97,21 +100,24 @@ class DCGAN(object):
         self.logger = SummaryWriter(self.log_path)
         self.logger.flush()
 
+    def _create_path(self, path):
+        if not os.path.exists(path):
+            os.makedirs(path)
+
     # create necessary directories
     def _create_all_paths(self):
-        self._create_path(self.input_store_path)
+        # create_path(self.input_store_path)
+        self._create_path(self.training_store_path)
+        self._create_path(self.evaluation_store_path)
         self._create_path(self.model_store_path)
         self._create_path(self.gen_image_store_path)
         self._create_path(self.output_store_path)
         self._create_path(self.log_path)
 
-    def _create_path(self, path):
-        if not os.path.exists(path):
-            os.makedirs(path)
-
     # load pretrained models and optimizers
     def _load_model(self, G_model_filename, D_model_filename=None, G_optim_filename=None, D_optim_filename=None):
-        self.G.load_state_dict(torch.load(os.path.join(self.model_store_path, G_model_filename)))
+        loaded_data = torch.load(os.path.join(self.model_store_path, G_model_filename))
+        self.G.load_state_dict(loaded_data['G'])
         print("Generator loaded from %s" % G_model_filename)
         if D_model_filename is not None:
             self.D.load_state_dict(torch.load(os.path.join(self.model_store_path, D_model_filename)))
@@ -122,10 +128,11 @@ class DCGAN(object):
         if D_optim_filename is not None:
             self.d_optimizer.load_state_dict(torch.load(os.path.join(self.model_store_path, D_optim_filename)))
             print("D_optimizer loaded from %s" % D_optim_filename)
+        return loaded_data['iter']
 
     # save pretrained models and optimizers
-    def _save_model(self, G_model_filename, D_model_filename=None, G_optim_filename=None, D_optim_filename=None):
-        torch.save(self.G.state_dict(), os.path.join(self.model_store_path, G_model_filename))
+    def _save_model(self, G_model_filename, D_model_filename=None, G_optim_filename=None, D_optim_filename=None, iter_count=None):
+        torch.save({'G': self.G.state_dict(), 'iter': iter_count}, os.path.join(self.model_store_path, G_model_filename))
         print("Generator saved to %s" % G_model_filename)
         if D_model_filename is not None:
             torch.save(self.D.state_dict(), os.path.join(self.model_store_path, D_model_filename))
@@ -143,50 +150,55 @@ class DCGAN(object):
         self.D.train()
         self.ContextNet.eval()
         if epoch_start > 0:
-            self._load_model("G_model_epoch_%s.pkl" % str(epoch_start).zfill(LEN_ZFILL),
-                             "D_model_epoch_%s.pkl" % str(epoch_start).zfill(LEN_ZFILL),
-                             "G_optim_epoch_%s.pkl" % str(epoch_start).zfill(LEN_ZFILL),
-                             "D_optim_epoch_%s.pkl" % str(epoch_start).zfill(LEN_ZFILL))
+            iter_count = self._load_model("G_model_epoch_%s.pkl" % str(epoch_start).zfill(LEN_ZFILL),
+                                          "D_model_epoch_%s.pkl" % str(epoch_start).zfill(LEN_ZFILL),
+                                          "G_optim_epoch_%s.pkl" % str(epoch_start).zfill(LEN_ZFILL),
+                                          "D_optim_epoch_%s.pkl" % str(epoch_start).zfill(LEN_ZFILL))
+            assert isinstance(iter_count, int)
+        else:
+            iter_count = 0
 
         # turn on debugging related to gradient
         torch.autograd.set_detect_anomaly(True)
 
-        # create data loader for yielding batches
-        dataset = DatasetDefiner(self.name, self.im_size, batch_size)
-        dataset.load_training_data(out_file=self.training_data_file)
-        dataset = dataset.get_attribute("training_data")
-        dataloader = torch.utils.data.DataLoader(dataset, 1, shuffle=True)  # batchsize = 1
-        total_batch_num = dataset.get_num_of_batchs()
+        # create data loader
+        dataset = DatasetDefiner(self.name, self.im_size, self.training_store_path, mode="train")
 
         # variables
+        n_clip = dataset.get_info("n_clip_train")
         imgs, out_reconstruction, out_instant_pred, out_longterm_pred = None, None, None, None
 
         # progress bar
-        progress = ProgressBar(total_batch_num * (epoch_end - epoch_start), fmt=ProgressBar.FULL)
+        progress = ProgressBar(n_clip * (epoch_end - epoch_start), fmt=ProgressBar.FULL)
         print("Started time:", datetime.datetime.now())
 
         # loop over epoch
         for epoch in range(epoch_start, epoch_end):
-            iter_count = 0
+            np.random.seed(epoch)   # to make sure getting similar results when training from pretrained models
+            clip_order = np.random.permutation(n_clip)
 
-            # get data info for each whole video
-            for video_idx, clip_indices in dataloader:
-
-                # zero grad for generator due to RNN
-                # self.G.zero_grad()
-
+            # process each clip
+            for clip_idx in clip_order:
+                dataset.load_data(clip_idx)
+                # adapt batch_size
+                tmp_batch_size = batch_size
+                while len(dataset.training_data) % tmp_batch_size < 2 and tmp_batch_size > 2:
+                    tmp_batch_size -= 1
+                #
+                dataloader = torch.utils.data.DataLoader(dataset.training_data, tmp_batch_size, shuffle=False)
                 #
                 d_loss_real, d_loss_fake = 0, 0
                 g_loss, d_loss = 0, 0
                 g_loss_total = 0
                 instant_loss, longterm_loss, reconst_loss = 0, 0, 0
 
-                # process short clip
-                for clip_index in clip_indices:
-
-                    # load batch data
-                    assert len(clip_index) == 2
-                    imgs = dataset.data[video_idx][clip_index[0]:clip_index[1]].to(self.device)
+                # process batch
+                msg = ""
+                for data_batch in dataloader:
+                    if len(data_batch) < 2:
+                        print("WARNING: len(data_batch) = %d < 2" % len(data_batch))    # just for test
+                        continue
+                    imgs = data_batch.to(self.device)
 
                     # ============================== Discriminator optimizing ==============================
 
@@ -246,13 +258,6 @@ class DCGAN(object):
                     g_loss_total.backward()
                     self.g_optimizer.step()
 
-                    # emit losses for visualization
-                    msg = " [(ctx: %.2f, rec: %.2f, ins: %.2f, ltm: %.2f), G_total: %.2f, G: %.2f, D: %.2f]" \
-                          % (context_loss.data.item(), reconst_loss.data.item(), instant_loss.data.item(), longterm_loss.data.item(),
-                             g_loss_total.data.item(), g_loss.data.item(), d_loss.data.item())
-                    progress.current += 1
-                    progress(msg)
-
                     # ============ TensorBoard logging ============#
                     # Log the scalar values
                     info = {
@@ -266,9 +271,17 @@ class DCGAN(object):
                        'Loss reconst': reconst_loss.data.item(),
                     }
                     for tag, value in info.items():
-                        self.logger.add_scalar(tag, value, epoch * total_batch_num + iter_count)
+                        self.logger.add_scalar(tag, value, iter_count)
 
                     iter_count += 1
+
+                    # emit losses for visualization
+                    msg = " [(ctx: %.2f, rec: %.2f, ins: %.2f, ltm: %.2f), G_total: %.2f, G: %.2f, D: %.2f]" \
+                          % (context_loss.data.item(), reconst_loss.data.item(), instant_loss.data.item(), longterm_loss.data.item(),
+                             g_loss_total.data.item(), g_loss.data.item(), d_loss.data.item())
+
+                progress.current += 1
+                progress(msg)
 
             self.logger.flush()
 
@@ -277,7 +290,8 @@ class DCGAN(object):
                 self._save_model("G_model_epoch_%s.pkl" % str(epoch + 1).zfill(LEN_ZFILL),
                                  "D_model_epoch_%s.pkl" % str(epoch + 1).zfill(LEN_ZFILL),
                                  "G_optim_epoch_%s.pkl" % str(epoch + 1).zfill(LEN_ZFILL),
-                                 "D_optim_epoch_%s.pkl" % str(epoch + 1).zfill(LEN_ZFILL))
+                                 "D_optim_epoch_%s.pkl" % str(epoch + 1).zfill(LEN_ZFILL),
+                                 iter_count=iter_count)
 
                 # Denormalize images and save them in grid 8x8
                 images_to_save = [[tensor_restore(imgs.data.cpu()[0]),
@@ -290,7 +304,7 @@ class DCGAN(object):
                                    tensor_restore(imgs.data.cpu()[-1]),
                                    tensor_restore(out_instant_pred.data.cpu()[-2]),
                                    tensor_restore(out_longterm_pred.data.cpu()[-2])]]
-                print([x.shape for x in images_to_save[0]], [x.shape for x in images_to_save[1]])
+                # print([x.shape for x in images_to_save[0]], [x.shape for x in images_to_save[1]])
                 images_to_save = [utils.make_grid(images, nrow=1) for images in images_to_save]
                 grid = utils.make_grid(images_to_save, nrow=2)
                 utils.save_image(grid, "%s/gen_epoch_%s.png" % (self.gen_image_store_path, str(epoch + 1).zfill(LEN_ZFILL)))
@@ -304,7 +318,8 @@ class DCGAN(object):
             self._save_model("G_model_epoch_%s.pkl" % str(epoch + 1).zfill(LEN_ZFILL),
                              "D_model_epoch_%s.pkl" % str(epoch + 1).zfill(LEN_ZFILL),
                              "G_optim_epoch_%s.pkl" % str(epoch + 1).zfill(LEN_ZFILL),
-                             "D_optim_epoch_%s.pkl" % str(epoch + 1).zfill(LEN_ZFILL))
+                             "D_optim_epoch_%s.pkl" % str(epoch + 1).zfill(LEN_ZFILL),
+                             iter_count=iter_count)
 
     # calculate output from pretrained model and store them to files
     # may feed training data to get losses as weights in evaluation
@@ -315,108 +330,97 @@ class DCGAN(object):
         self.G.eval()
 
         # dataloader for yielding batches
-        dataset = DatasetDefiner(self.name, self.im_size, batch_size)
         if data_set == "test_set":
-            dataset.load_evaluation_data(out_file=self.evaluation_data_file)
-            dataset = dataset.get_attribute("evaluation_data")
+            dataset = DatasetDefiner(self.name, self.im_size, self.evaluation_store_path, mode="eval")
+            n_clip = dataset.get_info("n_clip_test")
         else:
-            dataset.load_training_data(out_file=self.training_data_file)
-            dataset = dataset.get_attribute("training_data")
-
-        dataloader = torch.utils.data.DataLoader(dataset, 1, shuffle=False)  # batchsize = 1
-        total_batch_num = dataset.get_num_of_batchs()
+            dataset = DatasetDefiner(self.name, self.im_size, self.training_store_path, mode="train")
+            n_clip = dataset.get_info("n_clip_train")
 
         # init variables for batch evaluation
-        results_reconst, results_instant, results_longterm = [], [], []
+        # results_reconst, results_instant, results_longterm = [], [], []
 
         # progress bar
-        progress = ProgressBar(total_batch_num, fmt=ProgressBar.FULL)
+        progress = ProgressBar(n_clip, fmt=ProgressBar.FULL)
         print("Started time:", datetime.datetime.now())
 
         with torch.no_grad():
-            # get data info for each whole video
-            for video_idx, clip_indices in dataloader:
+            # process each clip
+            for clip_idx in range(n_clip):
+                dataset.load_data(clip_idx)
+                if data_set == "test_set":
+                    dataloader = torch.utils.data.DataLoader(dataset.evaluation_data, batch_size, shuffle=False)
+                else:
+                    dataloader = torch.utils.data.DataLoader(dataset.training_data, batch_size, shuffle=False)
+
                 output_reconst, output_instant, output_longterm = [], [], []
 
                 # evaluate a batch
-                for clip_idx in clip_indices:
-                    assert len(clip_idx) == 2
-                    imgs = dataset.data[video_idx][clip_idx[0]:clip_idx[1]].to(self.device)
-                    _, out_reconstruction, out_instant_pred, out_longterm_pred = self.G(imgs)
+                for data_batch in dataloader:
+                    imgs = data_batch.to(self.device)
+                    _, batch_reconst, batch_instant_pred, batch_longterm_pred = self.G(imgs)
 
                     # store results
-                    output_reconst.append(out_reconstruction)
-                    output_instant.append(out_instant_pred)
-                    output_longterm.append(out_longterm_pred)
+                    output_reconst.append(batch_reconst)
+                    output_instant.append(batch_instant_pred)
+                    output_longterm.append(batch_longterm_pred)
 
-                    progress.current += 1
-                    progress()
+                # store data to file
+                data = {"reconst": torch.cat(output_reconst, dim=0),
+                        "instant": torch.cat(output_instant, dim=0),
+                        "longterm": torch.cat(output_longterm, dim=0)}
+                out_path = self.output_store_path + '/out_epoch_%s/%s' % (str(epoch).zfill(LEN_ZFILL), data_set[:-4])
+                self._create_path(out_path)
+                out_file = os.path.join(out_path, '%s.pt' % str(clip_idx + 1).zfill(len(str(n_clip))))
+                torch.save(data, out_file)
+                print("Data saved to %s" % out_file)
 
-                results_reconst.append(torch.cat(output_reconst, dim=0))
-                results_instant.append(torch.cat(output_instant, dim=0))
-                results_longterm.append(torch.cat(output_longterm, dim=0))
+                progress.current += 1
+                progress()
 
         progress.done()
         print("Finished time:", datetime.datetime.now())
 
-        # store data to file
-        data = {"reconst": results_reconst,
-                "instant": results_instant,
-                "longterm": results_longterm}
-        out_file = self.output_store_path + '/out_epoch_%s_data_%s.pt' % (str(epoch).zfill(LEN_ZFILL), data_set)
-        torch.save(data, out_file)
-        print("Data saved to %s" % out_file)
+    # function for computing anomaly score
+    # input tensor shape: (n, C, H, W)
+    # power: used for combining channels (1=abs, 2=square)
+    def _calc_score(self, tensor, power=1, patch_size=5):
+        assert power in (1, 2) and patch_size % 2
+        # combine channels
+        tensor2 = torch.sum(torch.abs(tensor) if power == 1 else tensor**2, dim=1)
+        tensor2.unsqueeze_(1)
+        # convolution for most salient patch
+        weight = torch.ones(1, 1, patch_size, patch_size)
+        padding = patch_size // 2
+        heatmaps = F.conv2d(tensor2, weight, stride=1, padding=padding).numpy()
+        # get sum value and position of the patch
+        scores = [np.max(heatmap) for heatmap in heatmaps]
+        positions = [np.where(heatmap == np.max(heatmap)) for heatmap in heatmaps]
+        positions = [(position[0][0], position[1][0]) for position in positions]
+        # return scores and positions
+        return {"score": scores, "position": positions}
 
     # evaluation from frame-level groundtruth and (real eval data, output eval data)
     def evaluate(self, epoch):
+        dataset = DatasetDefiner(self.name, self.im_size, self.evaluation_store_path, mode="eval")
+        n_clip = dataset.get_info("n_clip_test")
+        reconst_patches, instant_patches, longterm_patches = [], [], []
 
-        # define function for computing anomaly score
-        # input tensor shape: (n, C, H, W)
-        # power: used for combining channels (1=abs, 2=square)
-        def calc_score(tensor, power=1, patch_size=5):
-            assert power in (1, 2) and patch_size % 2
-            # combine channels
-            tensor2 = torch.sum(torch.abs(tensor) if power == 1 else tensor**2, dim=1)
-            tensor2.unsqueeze_(1)
-            # convolution for most salient patch
-            weight = torch.ones(1, 1, patch_size, patch_size)
-            padding = patch_size // 2
-            # heatmaps = [F.conv2d(item, weight, stride=1, padding=padding).numpy() for item in tensor2]
-            heatmaps = F.conv2d(tensor2, weight, stride=1, padding=padding).numpy()
-            # get sum value and position of the patch
-            scores = [np.max(heatmap) for heatmap in heatmaps]
-            positions = [np.where(heatmap == np.max(heatmap)) for heatmap in heatmaps]
-            positions = [(position[0][0], position[1][0]) for position in positions]
-            # return scores and positions
-            return {"score": scores, "position": positions}
+        for clip_idx in range(n_clip):
+            dataset.load_data(clip_idx)
 
-        # load real data
-        eval_data_list = torch.load(self.evaluation_data_file)
-        assert isinstance(eval_data_list, (list, tuple))
-        print("Eval data shape:", [video.shape for video in eval_data_list])
+            # get input clip
+            input_data = dataset.evaluation_data[:]
 
-        # load outputted data
-        output_file = self.output_store_path + '/out_epoch_%s_data_test_set.pt' % str(epoch).zfill(LEN_ZFILL)
-        outputs = torch.load(output_file)
-        assert isinstance(outputs, dict)
-        reconst_list, instant_list, longterm_list = outputs["reconst"], outputs["instant"], outputs["longterm"]
-        assert isinstance(reconst_list, (list, tuple))
-        assert isinstance(instant_list, (list, tuple))
-        assert isinstance(longterm_list, (list, tuple))
+            # get output results
+            output_path = self.output_store_path + '/out_epoch_%s/test' % str(epoch).zfill(LEN_ZFILL)
+            output_file = os.path.join(output_path, '%s.pt' % str(clip_idx + 1).zfill(len(str(n_clip))))
+            output_data = torch.load(output_file)
 
-        # evaluation
-        assert len(eval_data_list) == len(reconst_list) == len(instant_list) == len(longterm_list)
-        # torch.tensor([torch.max(score) for score in torch.abs(out_reconstruction[0] - imgs[0, :-1])])
-        reconst_diff = [reconst_list[i][:-1].cpu() - eval_data_list[i][:-1].cpu() for i in range(len(eval_data_list))]
-        instant_diff = [instant_list[i][:-1].cpu() - eval_data_list[i][1:].cpu() for i in range(len(eval_data_list))]
-        longterm_diff = [longterm_list[i][:-1].cpu() - eval_data_list[i][1:].cpu() for i in range(len(eval_data_list))]
-
-        # compute patch scores and localize positions -> list of dicts
-        # temporary: get only scores
-        reconst_patches = [calc_score(tensor)["score"] for tensor in reconst_diff]
-        instant_patches = [calc_score(tensor)["score"] for tensor in instant_diff]
-        longterm_patches = [calc_score(tensor)["score"] for tensor in longterm_diff]
+            # calc difference tensor and patch scores
+            reconst_patches.append(self._calc_score(output_data["reconst"][:-1].cpu() - input_data[:-1].cpu())["score"])
+            instant_patches.append(self._calc_score(output_data["instant"][:-1].cpu() - input_data[:-1].cpu())["score"])
+            longterm_patches.append(self._calc_score(output_data["longterm"][:-1].cpu() - input_data[:-1].cpu())["score"])
 
         # return auc(s)
-        dataset = DatasetDefiner(self.name, self.im_size, -1)
         return dataset.evaluate(reconst_patches), dataset.evaluate(instant_patches), dataset.evaluate(longterm_patches)

@@ -91,8 +91,7 @@ class SemanticNet(nn.Module):
             else:
                 PIL_imgs = imgs
             if need_normalize:
-                imgs_tensor = torch.stack([tensor_normalize(img)
-                                          for img in PIL_imgs])
+                imgs_tensor = torch.stack([tensor_normalize(img).float() for img in PIL_imgs])
             else:
                 imgs_tensor = torch.stack(PIL_imgs)
         else:

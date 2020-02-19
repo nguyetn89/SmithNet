@@ -257,142 +257,135 @@ def summary(model, input_size, batch_size=-1, device="cuda", print_details=False
 # name: name of dataset for further storing files
 # im_size: expected image size
 # in_path: path for loading data
-# out_file: path for saving processed data (if in_path contains raw data)
+# out_path: path for saving processed data (if in_path contains raw data)
 # ext:
 #       "/" for directories containing images
-#       ".pt" for preprocessed data files
 #       ".xxx" for reading videos in the path
-# batch_size: number of frames feeding into network for each propagation
 class DataHelper(torch.utils.data.Dataset):
-    def __init__(self, name, im_size, in_path, out_file=None, default_ext=".avi", batch_size=24):
-        assert out_file is None or (isinstance(out_file, str) and out_file[-3:] == ".pt")
+    def __init__(self, name, im_size, in_path, expected_n_clip,
+                 out_path, extension=".avi", force_calc=False):
         super(DataHelper, self).__init__()
         # set name and data path
-        self.name = name
-        self.in_path = in_path
-        self.out_file = out_file
+        self._name = name
+        self._im_size = im_size
+        self._in_path = in_path
+        self._out_path = out_path
+        if not os.path.exists(out_path):
+            os.mkdirs(out_path)
+        self._data_to_access = None
 
-        # load data in the provided path
-        if out_file is not None and os.path.exists(out_file):
-            self.data = torch.load(out_file)  # data processed and saved in single file
-            print("Data loaded from '%s'..." % out_file)
-        else:
-            print("Processing data path: '%s'..." % in_path)
-            if in_path[-3:] == ".pt":
-                self.data = torch.load(in_path)
-            else:                   # load ensemble of single files
-                extensions = [".pt", "/", ".*"]
-                if default_ext not in extensions:
-                    extensions.insert(0, default_ext)
-                ext = None
-                for tmp_ext in extensions:
-                    template = in_path + "/*" + tmp_ext
-                    data_paths = sorted(glob.glob(template))
-                    if len(data_paths) > 0:
-                        ext = tmp_ext
-                        break
-                if ext is None:
-                    print("ERROR: data files not found!")
-                    return
-                if ext == ".pt":    # data from .pt files
-                    self.data = [torch.load(data_path) for data_path in data_paths]
-                elif ext == "/":    # load images in multiple directories
-                    self.data = [torch.stack([tensor_normalize(datum)
-                                 for datum in load_imgs_in_directory(data_path, "*", im_size)]) for data_path in data_paths]
-                else:               # load all videos in the specified path
-                    self.data = [torch.stack([tensor_normalize(datum) for datum in load_video(data_path, im_size)]) for data_path in data_paths]
+        # list of desired data files
+        self._out_data_files = [os.path.join(out_path, str(i+1).zfill(len(str(expected_n_clip))) + ".pt")
+                                for i in range(expected_n_clip)]
+        file_existing = [os.path.exists(file) for file in self._out_data_files]
 
-                # set directory for storing preprocessed data files
-                if out_file is not None:
-                    out_path, _ = os.path.split(out_file)
-                    if not os.path.exists(out_path):
-                        os.makedirs(out_path)
-                    # storing data file
-                    torch.save(self.data, out_file)
+        # skip processing data if all files are existed (i.e. processed)
+        if all(file_existing):
+            return
 
-        # set default batch_size
-        self.set_batch_size(batch_size)
+        # otherwise, check each clip and load/convert (if not existed)
+        self._in_data_paths = sorted(glob.glob(in_path + "/*" + extension))
+        assert len(self._in_data_paths) == expected_n_clip
 
-    def set_batch_size(self, batch_size):
-        self.batch_size = batch_size
-        if batch_size > 0:
-            self.batch_nums = [int(np.ceil(len(self.data[i])/self.batch_size)) for i in range(len(self.data))]
-            self.batch_indices = [[(i*self.batch_size, min((i+1)*self.batch_size, len(self.data[j]))) for i in range(self.batch_nums[j])]
-                                  for j in range(len(self.data))]
-        else:
-            self.batch_nums = len(self.data)
-            self.batch_indices = list(range(self.batch_nums))
+        # check each clip
+        for clip_idx in range(expected_n_clip):
+            if file_existing[clip_idx] and not force_calc:
+                continue
+            self.load_clip(clip_idx, force_calc=True)
 
-    def get_data_shape(self):
-        return [datum.shape for datum in self.data]
+    # process data of 1 clip and save to .pt file
+    # in_path: input data path (either a directory of images or a video file)
+    # out_file: path to .pt file storing preprocessed data from in_path
+    # im_size: desired frame resolution
+    def load_clip(self, clip_idx, get_output=False, force_calc=False):
+        out_file = self._out_data_files[clip_idx]
 
-    def get_num_of_batchs(self):
-        return np.sum(self.batch_nums) if self.batch_size > 0 else self.batch_nums
+        # clip was already processed -> just load it
+        if os.path.exists(out_file) and not force_calc:
+            # print("Output file %s is already existed -> loading..." % out_file)
+            if get_output:
+                return torch.load(out_file)
+            else:
+                return
+
+        # do not process .pt file (original data should be images or video)
+        in_path = self._in_data_paths[clip_idx]
+        if in_path[-3:] == ".pt":
+            print("Input file %s is already a .pt file -> check again" % in_path)
+            return None
+
+        # process data from directory / file
+        im_size = self._im_size
+        if os.path.isdir(in_path):
+            data = torch.stack([tensor_normalize(datum).float()
+                                for datum in load_imgs_in_directory(in_path, "*", im_size)])
+        elif os.path.isfile(in_path):
+            data = torch.stack([tensor_normalize(datum).float() for datum in load_video(in_path, im_size)])
+        torch.save(data, out_file)
+
+        # only return if necessary
+        if get_output:
+            return data
+
+    def set_clip_idx(self, clip_idx):
+        assert clip_idx in range(len(self._out_data_files))
+        self._data_to_access = self.load_clip(clip_idx, get_output=True)
 
     def __getitem__(self, index):
-        assert index in range(len(self.data))
-        # return whole video data and list of clip indices
-        if self.batch_size > 0:
-            return index, self.batch_indices[index]
-        else:
-            return index, self.data[index]
+        assert self._data_to_access is not None
+        # assert index in range(len(self._data_to_access))
+        return self._data_to_access[index]
 
     def __len__(self):
-        return len(self.data)
+        return len(self._data_to_access)
 
 
 # Class defining specific dataset for training and evaluation
+# data_path: path that processed data files (.pt) are stored
+# mode: this controller is for training or evaluation (for simplifying operations)
 class DatasetDefiner():
-    def __init__(self, name, im_size, batch_size):
-        assert name in ("UCSDped1", "UCSDped2", "Avenue", "Entrance", "Exit", "Shanghai", "Crime", "Belleview", "Train", "just4test")
+    def __init__(self, name, im_size, data_path, mode):
+        assert mode in ("train", "eval")
+        self._mode = mode
+
+        assert name in ("UCSDped1", "UCSDped2",
+                        "Avenue", "Entrance", "Exit",
+                        "Shanghai", "Crime",
+                        "Belleview", "Train",
+                        "just4test")
         # set basic attributes
         self._name = name
-        self._batch_size = batch_size
+        self._data_path = data_path
         self._im_size = im_size
-        # other attributes for further uses
-        self._training_data = None
-        self._evaluation_data = None
+        # data controllers
+        self.training_data = None
+        self.evaluation_data = None
         # set dataset attributes
         self._set_dataset_attributes()
 
-    # get private attributes by name
-    def get_attribute(self, attribute):
-        assert isinstance(attribute, str)
-        if attribute == "name":
-            return self._name
-        if attribute == "seq_len":
-            return self._seq_len
-        if attribute == "stride":
-            return self._stride
-        if attribute == "im_size":
-            return self._im_size
-        if attribute == "training_data":
-            return self._training_data
-        if attribute == "evaluation_data":
-            return self._evaluation_data
-        raise ValueError("Unknown attribute %s" % attribute)
+    def load_data(self, clip_idx):
+        if self._mode == "train":
+            self._load_training_data(clip_idx)
+        else:
+            self._load_evaluation_data(clip_idx)
 
     # create data helper for training set
-    def load_training_data(self, out_file=None):
-        if self._training_data is not None:
-            print("# ERROR: training data have already loaded!")
-            return
-        print("%s -> Loading training data..." % self._name)
-        self._training_data = DataHelper(self._name, self._im_size, self._training_path,
-                                         out_file=out_file, default_ext=".pt", batch_size=self._batch_size)
-        print("%s -> Training data loaded!" % self._name)
-        print("Data shape:", self._training_data.get_data_shape())
+    def _load_training_data(self, clip_idx):
+        assert clip_idx in range(self._n_clip_train)
+        if self.training_data is None:
+            self.training_data = DataHelper(self._name, self._im_size, self._training_path,
+                                            self._n_clip_train, out_path=self._data_path,
+                                            extension=self._extension)
+        self.training_data.set_clip_idx(clip_idx)
 
     # create data helper for evaluation set
-    def load_evaluation_data(self, out_file=None):
-        if self._evaluation_data is not None:
-            print("# ERROR: evaluation data have already loaded!")
-            return
-        print("%s -> Loading evaluation data..." % self._name)
-        self._evaluation_data = DataHelper(self._name, self._im_size, self._evaluation_path,
-                                           out_file=out_file, default_ext=".pt", batch_size=self._batch_size)
-        print("%s -> Evaluation data loaded!" % self._name)
-        print("Data shape:", self._evaluation_data.get_data_shape())
+    def _load_evaluation_data(self, clip_idx):
+        assert clip_idx in range(self._n_clip_test)
+        if self.evaluation_data is None:
+            self.evaluation_data = DataHelper(self._name, self._im_size, self._evaluation_path,
+                                              self._n_clip_test, out_path=self._data_path,
+                                              extension=self._extension)
+        self.evaluation_data.set_clip_idx(clip_idx)
 
     # clip_results: sequence of anomaly scores (clips) for the whole test set
     # clip_results must be an array of arrays (either numpy or torch tensor)
@@ -424,6 +417,7 @@ class DatasetDefiner():
             info = data_info[self._name]
             self._n_clip_train = info["n_clip_train"]
             self._n_clip_test = info["n_clip_test"]
+            self._extension = info["extension"]
             self._training_path = info["training_path"]
             self._evaluation_path = info["evaluation_path"]
             self._eval_groundtruth_frames = info["eval_groundtruth_frames"]
@@ -438,6 +432,14 @@ class DatasetDefiner():
 
         # done
         assert len(self._eval_groundtruth_clips) == len(self._eval_groundtruth_frames)
+
+    def get_info(self, info_name):
+        assert isinstance(info_name, str)
+        if info_name == "n_clip_train":
+            return self._n_clip_train
+        if info_name == "n_clip_test":
+            return self._n_clip_test
+        print("Unknown info_name %s" % info_name)
 
 
 # Modified from https://stackoverflow.com/questions/3160699/python-progress-bar
