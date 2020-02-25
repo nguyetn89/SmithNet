@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torchvision import utils
 from torch.utils.tensorboard import SummaryWriter
 
-from utils import get_img_shape, image_gradient, tensor_restore, ProgressBar, DatasetDefiner
+from utils import get_img_shape, image_gradient, images_restore, ProgressBar, DatasetDefiner
 from AnomaNet import ExpandedSE, GTNet
 from AnomaNet import AnomaNet as Generator
 from CONFIG import loss_weights
@@ -18,16 +18,18 @@ LEN_ZFILL = 5
 
 
 class Discriminator(nn.Module):
-    def __init__(self, im_size, device):
+    def __init__(self, im_size, device, use_optical_flow=True):
         super().__init__()
+        self.use_optical_flow = use_optical_flow
         # set device & input shape
         self.device = device
         self.IM_SIZE = get_img_shape(im_size)
 
         # architecture
         # pair(F[i], F[i+1]) or pair(F[i], F_hat[i+1])
+        in_channel = 5 if self.use_optical_flow else 6
         n_base_channel = 16 * 4  # no. of channels to start
-        self.network = nn.Sequential(nn.Conv2d(6, n_base_channel, kernel_size=3, stride=1, padding=1),  # end block 0
+        self.network = nn.Sequential(nn.Conv2d(in_channel, n_base_channel, kernel_size=3, stride=1, padding=1),  # end block 0
                                      nn.Conv2d(n_base_channel, 2*n_base_channel, kernel_size=2, stride=2, padding=0),
                                      nn.Conv2d(2*n_base_channel, 2*n_base_channel, kernel_size=3, stride=1, padding=1),
                                      nn.LeakyReLU(negative_slope=0.2, inplace=True),  # end block 1
@@ -48,18 +50,20 @@ class Discriminator(nn.Module):
         self.output = nn.Sigmoid()
         self.to(self.device)
 
-    # X must have shape (B, 9, H, W)
-    # 9 channels: F[i], F_instant[i+1], F_longterm[i+1]
+    # X must have shape (B, 6, H, W)
+    # 6 channels: F[i], F_instant[i+1] or F_longterm[i+1]
     def forward(self, X):
-        frame, pred_instant, pred_longterm = torch.split(X, 3, dim=1)
-        prob_instant = self.output(self.network(torch.cat([frame, pred_instant], dim=1)))
-        prob_longterm = self.output(self.network(torch.cat([frame, pred_longterm], dim=1)))
-        return 0.5 * (prob_instant + prob_longterm)
+        logit = self.network(X)
+        prob = self.output(logit)
+        return logit, prob
 
 
 # name: dataset's name
 class DCGAN(object):
-    def __init__(self, name, im_size, store_path, device_str=None):
+    def __init__(self, name, im_size, store_path, use_optical_flow=True, device_str=None, use_progress_bar=True):
+        self.use_optical_flow = use_optical_flow
+        self.use_progress_bar = use_progress_bar
+        #
         self.name = name
         self.im_size = im_size
         # paths
@@ -68,8 +72,6 @@ class DCGAN(object):
             % (str(self.im_size[0]).zfill(3), str(self.im_size[1]).zfill(3))  # data for training and evaluation
         self.training_store_path = self.input_store_path + "/training"
         self.evaluation_store_path = self.input_store_path + "/evaluation"
-        # self.training_data_file = os.path.join(self.input_store_path, self.name + "_training.pt")
-        # self.evaluation_data_file = os.path.join(self.input_store_path, self.name + "_evaluation.pt")
         self.model_store_path = self.store_path + "/models"             # trained models
         self.gen_image_store_path = self.store_path + "/gen_images"     # generated images (for visual checking)
         self.output_store_path = self.store_path + "/outputs"           # outputs for evaluation
@@ -88,9 +90,9 @@ class DCGAN(object):
         self.ContextNet.eval()
 
         print("DCGAN init...")
-        self.G = Generator(self.im_size, self.device)
-        self.D = Discriminator(self.im_size, self.device)
-        self.loss = nn.BCELoss()
+        self.G = Generator(self.im_size, self.device, self.use_optical_flow)
+        self.D = Discriminator(self.im_size, self.device, self.use_optical_flow)
+        self.loss = nn.BCEWithLogitsLoss()  # BCEWithLogitsLoss replacing BCELoss
 
         # ADAM optimizers
         self.d_optimizer = optim.Adam(self.D.parameters(), lr=0.00002, betas=(0.5, 0.9))
@@ -115,34 +117,42 @@ class DCGAN(object):
         self._create_path(self.log_path)
 
     # load pretrained models and optimizers
-    def _load_model(self, G_model_filename, D_model_filename=None, G_optim_filename=None, D_optim_filename=None):
+    def _load_model(self, G_model_filename, D_model_filename=None, G_optim_filename=None, D_optim_filename=None, silence=True):
         loaded_data = torch.load(os.path.join(self.model_store_path, G_model_filename))
         self.G.load_state_dict(loaded_data['G'])
-        print("Generator loaded from %s" % G_model_filename)
+        if not silence:
+            print("Generator loaded from %s" % G_model_filename)
         if D_model_filename is not None:
             self.D.load_state_dict(torch.load(os.path.join(self.model_store_path, D_model_filename)))
-            print("Discriminator loaded from %s" % D_model_filename)
+            if not silence:
+                print("Discriminator loaded from %s" % D_model_filename)
         if G_optim_filename is not None:
             self.g_optimizer.load_state_dict(torch.load(os.path.join(self.model_store_path, G_optim_filename)))
-            print("G_optimizer loaded from %s" % G_optim_filename)
+            if not silence:
+                print("G_optimizer loaded from %s" % G_optim_filename)
         if D_optim_filename is not None:
             self.d_optimizer.load_state_dict(torch.load(os.path.join(self.model_store_path, D_optim_filename)))
-            print("D_optimizer loaded from %s" % D_optim_filename)
+            if not silence:
+                print("D_optimizer loaded from %s" % D_optim_filename)
         return loaded_data['iter']
 
     # save pretrained models and optimizers
-    def _save_model(self, G_model_filename, D_model_filename=None, G_optim_filename=None, D_optim_filename=None, iter_count=None):
+    def _save_model(self, G_model_filename, D_model_filename=None, G_optim_filename=None, D_optim_filename=None, iter_count=None, silence=True):
         torch.save({'G': self.G.state_dict(), 'iter': iter_count}, os.path.join(self.model_store_path, G_model_filename))
-        print("Generator saved to %s" % G_model_filename)
+        if not silence:
+            print("Generator saved to %s" % G_model_filename)
         if D_model_filename is not None:
             torch.save(self.D.state_dict(), os.path.join(self.model_store_path, D_model_filename))
-            print("Discriminator saved to %s" % D_model_filename)
+            if not silence:
+                print("Discriminator saved to %s" % D_model_filename)
         if D_optim_filename is not None:
             torch.save(self.d_optimizer.state_dict(), os.path.join(self.model_store_path, D_optim_filename))
-            print("D_optimizer saved to %s" % D_optim_filename)
+            if not silence:
+                print("D_optimizer saved to %s" % D_optim_filename)
         if G_optim_filename is not None:
             torch.save(self.g_optimizer.state_dict(), os.path.join(self.model_store_path, G_optim_filename))
-            print("G_optimizer saved to %s" % G_optim_filename)
+            if not silence:
+                print("G_optimizer saved to %s" % G_optim_filename)
 
     def train(self, epoch_start, epoch_end, batch_size=16, save_every_x_epochs=5):
         # set mode for networks
@@ -169,12 +179,15 @@ class DCGAN(object):
         imgs, out_reconstruction, out_instant_pred, out_longterm_pred = None, None, None, None
 
         # progress bar
-        progress = ProgressBar(n_clip * (epoch_end - epoch_start), fmt=ProgressBar.FULL)
+        progress = None
+        if self.use_progress_bar:
+            progress = ProgressBar(n_clip * (epoch_end - epoch_start), fmt=ProgressBar.FULL)
         print("Started time:", datetime.datetime.now())
 
         # loop over epoch
         for epoch in range(epoch_start, epoch_end):
             np.random.seed(epoch)   # to make sure getting similar results when training from pretrained models
+            torch.manual_seed(epoch)
             clip_order = np.random.permutation(n_clip)
 
             # process each clip
@@ -182,9 +195,11 @@ class DCGAN(object):
                 dataset.load_data(clip_idx)
                 # adapt batch_size
                 tmp_batch_size = batch_size
-                while len(dataset.training_data) % tmp_batch_size < 2 and tmp_batch_size > 2:
+                # last frame does not have optical flow
+                possible_length_data = len(dataset.training_data) - (1 if self.use_optical_flow else 0)
+                while possible_length_data % tmp_batch_size == 1 and tmp_batch_size > 2:
                     tmp_batch_size -= 1
-                #
+                # >>>>>>>> TODO: check whether it is better if shuffle is True <<<<<<<<<
                 dataloader = torch.utils.data.DataLoader(dataset.training_data, tmp_batch_size, shuffle=False)
                 #
                 d_loss_real, d_loss_fake = 0, 0
@@ -195,25 +210,48 @@ class DCGAN(object):
                 # process batch
                 msg = ""
                 for data_batch in dataloader:
+                    # normalize data to range [0, 1] and then [-1, 1]
+                    imgs = data_batch[:, :3, :, :].to(self.device) / 255.
+                    imgs *= 2.
+                    imgs -= 1.
+                    #
+                    if self.use_optical_flow:
+                        flows = data_batch[:, 3:, :, :].to(self.device)
+                        assert len(imgs) == len(flows)
+                        if torch.sum(torch.abs(flows[-1])) == 0.0:
+                            imgs, flows = imgs[:-1], flows[:-1]
+                        if len(imgs) == 0 or len(flows) == 0:
+                            continue
+
                     if len(data_batch) < 2:
                         print("WARNING: len(data_batch) = %d < 2" % len(data_batch))    # just for test
                         continue
-                    imgs = data_batch.to(self.device)
 
                     # ============================== Discriminator optimizing ==============================
 
-                    # discriminator loss with real images
-                    real_D_input = torch.cat([imgs[:-1], imgs[1:], imgs[1:]], dim=1)
-                    real_D_output = self.D(real_D_input)
-                    d_loss_real = self.loss(real_D_output, torch.ones_like(real_D_output).to(self.device))
+                    # discriminator loss with real data
+                    if not self.use_optical_flow:
+                        real_D_input = torch.cat([imgs[:-1], imgs[1:]], dim=1)
+                    else:
+                        real_D_input = torch.cat([imgs, flows], dim=1)
+                    real_D_output_logit, _ = self.D(real_D_input)
+                    d_loss_real = self.loss(real_D_output_logit, torch.ones_like(real_D_output_logit).to(self.device))
 
                     # get fake outputs from Generator
                     in_context, out_reconstruction, out_instant_pred, out_longterm_pred = self.G(imgs)
 
-                    # discriminator loss with fake images
-                    fake_D_input = torch.cat([imgs[:-1], out_instant_pred[:-1], out_longterm_pred[:-1]], dim=1)
-                    fake_D_output = self.D(fake_D_input)
-                    d_loss_fake = self.loss(fake_D_output, torch.zeros_like(fake_D_output).to(self.device))
+                    # discriminator loss with fake data
+                    last_idx = len(imgs) if self.use_optical_flow else -1   # remove last frame if using frame prediction
+                    fake_D_input_instant = torch.cat([imgs[:last_idx], out_instant_pred[:last_idx]], dim=1)
+                    fake_D_input_longterm = torch.cat([imgs[:last_idx], out_longterm_pred[:last_idx]], dim=1)
+
+                    fake_D_output_logit_instant, _ = self.D(fake_D_input_instant)
+                    fake_D_output_logit_longterm, _ = self.D(fake_D_input_longterm)
+                    d_loss_fake_instant = self.loss(fake_D_output_logit_instant,
+                                                    torch.zeros_like(fake_D_output_logit_instant).to(self.device))
+                    d_loss_fake_longterm = self.loss(fake_D_output_logit_longterm,
+                                                     torch.zeros_like(fake_D_output_logit_longterm).to(self.device))
+                    d_loss_fake = 0.5 * (d_loss_fake_instant + d_loss_fake_longterm)
 
                     # optimize discriminator
                     d_loss = 0.5*d_loss_fake + 0.5*d_loss_real
@@ -223,11 +261,17 @@ class DCGAN(object):
 
                     # ============================== Generator optimizing ==============================
 
-                    fake_D_output = self.D(fake_D_input)
-                    g_loss = self.loss(fake_D_output, torch.ones_like(fake_D_output).to(self.device))
+                    fake_D_output_logit_instant, _ = self.D(fake_D_input_instant)
+                    fake_D_output_logit_longterm, _ = self.D(fake_D_input_longterm)
+                    g_loss_instant = self.loss(fake_D_output_logit_instant,
+                                               torch.ones_like(fake_D_output_logit_instant).to(self.device))
+                    g_loss_longterm = self.loss(fake_D_output_logit_longterm,
+                                                torch.ones_like(fake_D_output_logit_longterm).to(self.device))
+
+                    g_loss = g_loss_instant + g_loss_longterm
 
                     # groundtruth context
-                    gt_context = self.ContextNet(imgs)
+                    gt_context = self.ContextNet((imgs + 1.) * 0.5)  # recover original inputs because of the pretrained model
 
                     # define loss functions, may be different for partial losses
                     L2_loss, L1_loss = nn.MSELoss(), nn.L1Loss()
@@ -236,18 +280,23 @@ class DCGAN(object):
                     context_loss = L2_loss(in_context, gt_context)
 
                     # prediction losses
-                    dx_instant_pred, dy_instant_pred = image_gradient(out_instant_pred[:-1], out_abs=True)
-                    dx_longterm_pred, dy_longterm_pred = image_gradient(out_longterm_pred[:-1], out_abs=True)
-                    dx_input, dy_input = image_gradient(imgs[1:], out_abs=True)
-                    instant_loss = L2_loss(out_instant_pred[:-1], imgs[1:]) + \
-                        L1_loss(dx_instant_pred, dx_input) + L1_loss(dy_instant_pred, dy_input)
-                    longterm_loss = L2_loss(out_longterm_pred[:-1], imgs[1:]) + \
-                        L1_loss(dx_longterm_pred, dx_input) + L1_loss(dy_longterm_pred, dy_input)
+                    if not self.use_optical_flow:
+                        dx_instant_pred, dy_instant_pred = image_gradient(out_instant_pred[:-1], out_abs=True)
+                        dx_longterm_pred, dy_longterm_pred = image_gradient(out_longterm_pred[:-1], out_abs=True)
+                        dx_input, dy_input = image_gradient(imgs[1:], out_abs=True)
+                        instant_loss = L2_loss(out_instant_pred[:-1], imgs[1:]) + \
+                            L1_loss(dx_instant_pred, dx_input) + L1_loss(dy_instant_pred, dy_input)
+                        longterm_loss = L2_loss(out_longterm_pred[:-1], imgs[1:]) + \
+                            L1_loss(dx_longterm_pred, dx_input) + L1_loss(dy_longterm_pred, dy_input)
+                    else:
+                        instant_loss = L1_loss(out_instant_pred, flows)
+                        longterm_loss = L1_loss(out_longterm_pred, flows)
 
                     # reconstruction loss
-                    dx_recons_pred, dy_recons_pred = image_gradient(out_reconstruction[:-1], out_abs=True)
-                    dx_input, dy_input = image_gradient(imgs[:-1], out_abs=True)
-                    reconst_loss = L2_loss(out_reconstruction[:-1], imgs[:-1]) + \
+                    last_idx = len(imgs) if self.use_optical_flow else -1
+                    dx_recons_pred, dy_recons_pred = image_gradient(out_reconstruction[:last_idx], out_abs=True)
+                    dx_input, dy_input = image_gradient(imgs[:last_idx], out_abs=True)
+                    reconst_loss = L2_loss(out_reconstruction[:last_idx], imgs[:last_idx]) + \
                         L1_loss(dx_recons_pred, dx_input) + L1_loss(dy_recons_pred, dy_input)
 
                     # total loss
@@ -266,6 +315,7 @@ class DCGAN(object):
                        'Loss D': d_loss.data.item(),
                        'Loss G total': g_loss_total.data.item(),
                        'Loss G': g_loss.data.item(),
+                       'Loss context': context_loss.data.item(),
                        'Loss instant': instant_loss.data.item(),
                        'Loss longterm': longterm_loss.data.item(),
                        'Loss reconst': reconst_loss.data.item(),
@@ -280,8 +330,9 @@ class DCGAN(object):
                           % (context_loss.data.item(), reconst_loss.data.item(), instant_loss.data.item(), longterm_loss.data.item(),
                              g_loss_total.data.item(), g_loss.data.item(), d_loss.data.item())
 
-                progress.current += 1
-                progress(msg)
+                if progress is not None:
+                    progress.current += 1
+                    progress(msg)
 
             self.logger.flush()
 
@@ -294,23 +345,30 @@ class DCGAN(object):
                                  iter_count=iter_count)
 
                 # Denormalize images and save them in grid 8x8
-                images_to_save = [[tensor_restore(imgs.data.cpu()[0]),
-                                   tensor_restore(out_reconstruction.data.cpu()[0]),
-                                   tensor_restore(imgs.data.cpu()[1]),
-                                   tensor_restore(out_instant_pred.data.cpu()[0]),
-                                   tensor_restore(out_longterm_pred.data.cpu()[0])],
-                                  [tensor_restore(imgs.data.cpu()[-2]),
-                                   tensor_restore(out_reconstruction.data.cpu()[-2]),
-                                   tensor_restore(imgs.data.cpu()[-1]),
-                                   tensor_restore(out_instant_pred.data.cpu()[-2]),
-                                   tensor_restore(out_longterm_pred.data.cpu()[-2])]]
-                # print([x.shape for x in images_to_save[0]], [x.shape for x in images_to_save[1]])
-                images_to_save = [utils.make_grid(images, nrow=1) for images in images_to_save]
-                grid = utils.make_grid(images_to_save, nrow=2)
+                # images_to_save = [[images_restore(imgs.data[0].cpu()),
+                #                    images_restore(out_reconstruction.data[0].cpu()),
+                #                    images_restore(imgs.data[1].cpu()),
+                #                    images_restore(out_instant_pred.data[0].cpu(), is_optical_flow=True),
+                #                    images_restore(out_longterm_pred.data[0].cpu(), is_optical_flow=True)],
+                #                   [images_restore(imgs.data[-2].cpu()),
+                #                    images_restore(out_reconstruction.data[-2].cpu()),
+                #                    images_restore(imgs.data[-1].cpu()),
+                #                    images_restore(out_instant_pred.data[-2].cpu(), is_optical_flow=True),
+                #                    images_restore(out_longterm_pred.data[-2].cpu(), is_optical_flow=True)]]
+                # # print([x.shape for x in images_to_save[0]], [x.shape for x in images_to_save[1]])
+                # images_to_save = [utils.make_grid(images, nrow=1) for images in images_to_save]
+                # grid = utils.make_grid(images_to_save, nrow=2)
+                images_to_save = [images_restore(imgs.data[0].cpu()),
+                                  images_restore(out_reconstruction.data[0].cpu()),
+                                  images_restore(imgs.data[1].cpu()),
+                                  images_restore(out_instant_pred.data[0].cpu(), is_optical_flow=self.use_optical_flow),
+                                  images_restore(out_longterm_pred.data[0].cpu(), is_optical_flow=self.use_optical_flow)]
+                grid = utils.make_grid(images_to_save, nrow=1)
                 utils.save_image(grid, "%s/gen_epoch_%s.png" % (self.gen_image_store_path, str(epoch + 1).zfill(LEN_ZFILL)))
 
         # finish iteration
-        progress.done()
+        if progress is not None:
+            progress.done()
         print("Finished time:", datetime.datetime.now())
 
         # Save the trained parameters
@@ -341,7 +399,9 @@ class DCGAN(object):
         # results_reconst, results_instant, results_longterm = [], [], []
 
         # progress bar
-        progress = ProgressBar(n_clip, fmt=ProgressBar.FULL)
+        progress = None
+        if self.use_progress_bar:
+            progress = ProgressBar(n_clip, fmt=ProgressBar.FULL)
         print("Started time:", datetime.datetime.now())
 
         with torch.no_grad():
@@ -356,35 +416,53 @@ class DCGAN(object):
                 output_reconst, output_instant, output_longterm = [], [], []
 
                 # evaluate a batch
+                imgs = None
                 for data_batch in dataloader:
-                    imgs = data_batch.to(self.device)
+                    imgs = data_batch[:, :3, :, :].to(self.device) / 255.  # eval ALL video frames
+                    imgs *= 2.
+                    imgs -= 1.
                     _, batch_reconst, batch_instant_pred, batch_longterm_pred = self.G(imgs)
 
                     # store results
-                    output_reconst.append(batch_reconst)
-                    output_instant.append(batch_instant_pred)
-                    output_longterm.append(batch_longterm_pred)
+                    output_reconst.append(batch_reconst.cpu().numpy())
+                    output_instant.append(batch_instant_pred.cpu().numpy())
+                    output_longterm.append(batch_longterm_pred.cpu().numpy())
 
                 # store data to file
-                data = {"reconst": torch.cat(output_reconst, dim=0),
-                        "instant": torch.cat(output_instant, dim=0),
-                        "longterm": torch.cat(output_longterm, dim=0)}
+                data = {"reconst": np.concatenate(output_reconst, axis=0),
+                        "instant": np.concatenate(output_instant, axis=0),
+                        "longterm": np.concatenate(output_longterm, axis=0)}
                 out_path = self.output_store_path + '/out_epoch_%s/%s' % (str(epoch).zfill(LEN_ZFILL), data_set[:-4])
                 self._create_path(out_path)
-                out_file = os.path.join(out_path, '%s.pt' % str(clip_idx + 1).zfill(len(str(n_clip))))
-                torch.save(data, out_file)
-                print("Data saved to %s" % out_file)
+                out_file = os.path.join(out_path, '%s.npy' % str(clip_idx + 1).zfill(len(str(n_clip))))
+                np.save(out_file, data)
+                if not self.use_progress_bar:
+                    print("Data saved to %s" % out_file)
 
-                progress.current += 1
-                progress()
+                # save example image
+                images_to_save = [images_restore(imgs.data[-2].cpu().numpy()),
+                                  images_restore(data["reconst"][-2]),
+                                  images_restore(imgs.data[-1].cpu().numpy()),
+                                  images_restore(data["instant"][-2], is_optical_flow=self.use_optical_flow),
+                                  images_restore(data["longterm"][-2], is_optical_flow=self.use_optical_flow)]
+                grid = utils.make_grid([torch.tensor(image) for image in images_to_save], nrow=1)
+                out_file = os.path.join(out_path, '%s.png' % str(clip_idx + 1).zfill(len(str(n_clip))))
+                utils.save_image(grid, out_file)
 
-        progress.done()
+                if progress is not None:
+                    progress.current += 1
+                    progress()
+
+        if progress is not None:
+            progress.done()
         print("Finished time:", datetime.datetime.now())
 
     # function for computing anomaly score
     # input tensor shape: (n, C, H, W)
     # power: used for combining channels (1=abs, 2=square)
     def _calc_score(self, tensor, power=1, patch_size=5):
+        if not isinstance(tensor, torch.Tensor):
+            tensor = torch.tensor(tensor)
         assert power in (1, 2) and patch_size % 2
         # combine channels
         tensor2 = torch.sum(torch.abs(tensor) if power == 1 else tensor**2, dim=1)
@@ -404,23 +482,29 @@ class DCGAN(object):
     def evaluate(self, epoch):
         dataset = DatasetDefiner(self.name, self.im_size, self.evaluation_store_path, mode="eval")
         n_clip = dataset.get_info("n_clip_test")
-        reconst_patches, instant_patches, longterm_patches = [], [], []
+        reconst_scores, instant_scores, longterm_scores = [], [], []
 
         for clip_idx in range(n_clip):
             dataset.load_data(clip_idx)
 
-            # get input clip
-            input_data = dataset.evaluation_data[:]
+            # get input data
+            imgs = dataset.evaluation_data[:][:, :3, :, :]
+            if self.use_optical_flow:
+                flows = dataset.evaluation_data[:][:, 3:, :, :]
 
             # get output results
             output_path = self.output_store_path + '/out_epoch_%s/test' % str(epoch).zfill(LEN_ZFILL)
-            output_file = os.path.join(output_path, '%s.pt' % str(clip_idx + 1).zfill(len(str(n_clip))))
-            output_data = torch.load(output_file)
+            output_file = os.path.join(output_path, '%s.npy' % str(clip_idx + 1).zfill(len(str(n_clip))))
+            output_data = np.load(output_file).item()
 
             # calc difference tensor and patch scores
-            reconst_patches.append(self._calc_score(output_data["reconst"][:-1].cpu() - input_data[:-1].cpu())["score"])
-            instant_patches.append(self._calc_score(output_data["instant"][:-1].cpu() - input_data[:-1].cpu())["score"])
-            longterm_patches.append(self._calc_score(output_data["longterm"][:-1].cpu() - input_data[:-1].cpu())["score"])
+            reconst_scores.append(self._calc_score(output_data["reconst"][:-1] - imgs[:-1])["score"])
+            if not self.use_optical_flow:
+                instant_scores.append(self._calc_score(output_data["instant"][:-1] - imgs[1:])["score"])
+                longterm_scores.append(self._calc_score(output_data["longterm"][:-1] - imgs[1:])["score"])
+            else:
+                instant_scores.append(self._calc_score(output_data["instant"][:-1] - flows[:-1])["score"])
+                longterm_scores.append(self._calc_score(output_data["longterm"][:-1] - flows[:-1])["score"])
 
         # return auc(s)
-        return dataset.evaluate(reconst_patches), dataset.evaluate(instant_patches), dataset.evaluate(longterm_patches)
+        return dataset.evaluate(reconst_scores), dataset.evaluate(instant_scores), dataset.evaluate(longterm_scores)

@@ -2,15 +2,17 @@
     Can be used with any pretrained network
 """
 
-import cv2
+import numpy as np
 
 import torch
 import torchvision
 import torch.nn as nn
 # from torchsummary import summary
+# from torchvision import transforms
 from utils import summary
 
-from utils import tensor_normalize, freeze_all_layers, CV_to_PIL
+from utils import freeze_all_layers
+# from utils import tensor_normalize, freeze_all_layers, CV_to_PIL
 
 
 class NetInfo():
@@ -43,15 +45,16 @@ Net_dict = {"VGG19": NetInfo({2:  9, 4: 18, 8:  27, 16:  36, 32:  38},
 
 
 class SemanticNet(nn.Module):
-    def __init__(self, size, backbone="VGG19", reduction=8, n_layer_desire=-1):
+    def __init__(self, size, backbone="VGG19", reduction=8, n_layer_desire=-1, device=None):
         assert backbone in Net_dict
         assert reduction in (2, 4, 8, 16, 32)
         assert isinstance(size, (list, tuple)) and len(size) == 2
         super(SemanticNet, self).__init__()
         # resolution reduction from input to output
         self.IM_SIZE = size
-        self.device = torch.device("cuda:0" if torch.cuda.is_available()
-                                   else "cpu")
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu") if device is None else device
+        self.data_mean = torch.tensor([0.485, 0.456, 0.406]).type(torch.float32).to(self.device)
+        self.data_std = torch.tensor([0.229, 0.224, 0.225]).type(torch.float32).to(self.device)
         self.size_reduce = reduction
         net_info = Net_dict[backbone]
         n_layer = net_info.reduce_dict[reduction]
@@ -81,26 +84,22 @@ class SemanticNet(nn.Module):
 
     # upscale: None -> do nothing; 1: original image size
     # (h, w): specified size
-    def _evaluate_batch(self, imgs, is_cv_img, need_normalize, upscale):
+    def _evaluate_batch(self, imgs, upscale):
         assert upscale is None or upscale == 1 \
                 or (isinstance(upscale, (list, tuple)) and len(upscale) == 2)
-        # convert opencv data to PIL data
-        if isinstance(imgs, (list, tuple)):
-            if is_cv_img:
-                PIL_imgs = [CV_to_PIL(img) for img in imgs]
-            else:
-                PIL_imgs = imgs
-            if need_normalize:
-                imgs_tensor = torch.stack([tensor_normalize(img).float() for img in PIL_imgs])
-            else:
-                imgs_tensor = torch.stack(PIL_imgs)
-        else:
-            imgs_tensor = imgs
-
+        # normalize if needed
+        # if isinstance(imgs, (list, tuple)):
+        #     imgs = np.array(imgs)
+        assert isinstance(imgs, (np.ndarray, torch.Tensor))
+        if not isinstance(imgs, torch.Tensor):
+            imgs = torch.from_numpy(imgs.astype(np.float32))
+        assert torch.max(imgs).item() <= 1. and torch.min(imgs).item() >= 0.
+        # convert image to channel_last, then normalize and convert to channel_first
+        imgs = torch.stack([((img.permute(1, 2, 0) - self.data_mean) / self.data_std).permute(2, 0, 1) for img in imgs])
         # set model to evaluation mode and execute
         self.model.eval()
         with torch.no_grad():
-            features = self.model(imgs_tensor.to(self.device))
+            features = self.model(imgs.to(self.device))
             if upscale:
                 sz = self.IM_SIZE if upscale == 1 else upscale
                 scaled_features = nn.functional.interpolate(
@@ -111,12 +110,8 @@ class SemanticNet(nn.Module):
 
         return features, None
 
-    def estimate(self, imgs, is_cv_img=True, need_normalize=True,
-                 upscale=None, print_shape=False):
-        features, scaled_features = self._evaluate_batch(
-                                    imgs, is_cv_img,
-                                    need_normalize,
-                                    upscale)
+    def estimate(self, imgs, upscale=None, print_shape=False):
+        features, scaled_features = self._evaluate_batch(imgs, upscale)
         if print_shape:
             print("feature shape:", features.shape)
             if scaled_features is not None:
@@ -124,15 +119,15 @@ class SemanticNet(nn.Module):
         return features, scaled_features
 
 
-def simple_test():
-    SCALE = 0.09
-    img_path = './../test-images/office/15.png'
-    image = cv2.resize(cv2.imread(img_path), (0, 0), fx=SCALE, fy=SCALE)
-    in_shape = image.shape[:2]
-    estimator = SemanticNet(in_shape, backbone="VGG19", reduction=8)
-    estimator.get_summary(print_details=True)
-    estimator.estimate([image, cv2.flip(image, 1)], upscale=1)
-
-
-if __name__ == "__main__":
-    simple_test()
+# def simple_test():
+#     SCALE = 0.09
+#     img_path = './../test-images/office/15.png'
+#     image = cv2.resize(cv2.imread(img_path), (0, 0), fx=SCALE, fy=SCALE)
+#     in_shape = image.shape[:2]
+#     estimator = SemanticNet(in_shape, backbone="VGG19", reduction=8)
+#     estimator.get_summary(print_details=True)
+#     estimator.estimate([image, cv2.flip(image, 1)], upscale=1)
+#
+#
+# if __name__ == "__main__":
+#     simple_test()

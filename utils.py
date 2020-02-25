@@ -4,39 +4,117 @@ import torch
 import os
 import sys
 import re
-from PIL import Image
+# from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
-import torchvision.transforms as transforms
+# import torchvision.transforms as transforms
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score, roc_curve
 from scipy.io import loadmat
 from collections import OrderedDict
 
+from flowlib import flow_to_image
 from CONFIG import data_info
 
-mean = torch.tensor([0.485, 0.456, 0.406])
-std = torch.tensor([0.229, 0.224, 0.225])
+# # mean = torch.tensor([0.485, 0.456, 0.406])
+# # std = torch.tensor([0.229, 0.224, 0.225])
+#
+# mean = torch.tensor([0.5, 0.5, 0.5])
+# std = torch.tensor([0.5, 0.5, 0.5])
+#
+# tensor_normalize = transforms.Compose([transforms.ToTensor(),
+#                                        transforms.Normalize(mean=mean,
+#                                                             std=std)])
+#
+#
+# def tensor_restore(in_tensor, clamp=True):
+#     out_tensor = in_tensor
+#     # multiple std
+#     out_tensor[0] *= std[0]
+#     out_tensor[1] *= std[1]
+#     out_tensor[2] *= std[2]
+#     # plus mean
+#     out_tensor[0] += mean[0]
+#     out_tensor[1] += mean[1]
+#     out_tensor[2] += mean[2]
+#     if clamp:
+#         out_tensor = torch.clamp(out_tensor, min=0.0, max=1.0)
+#     return out_tensor
 
-tensor_normalize = transforms.Compose([transforms.ToTensor(),
-                                       transforms.Normalize(mean=mean,
-                                                            std=std)])
+
+# def images_normalize(in_data):
+#     if isinstance(in_data, (list, tuple)):
+#         if type(in_data[0]) == np.ndarray:
+#             out_data = np.array(in_data).astype(np.float32)
+#         elif type(in_data[0]) == torch.Tensor:
+#             out_data = torch.stack(in_data, dim=0)
+#         else:
+#             print("Unknown data type:", type(in_data[0]))
+#             return in_data
+#     else:
+#         assert isinstance(in_data, (np.ndarray, torch.Tensor))
+#         out_data = in_data
+#
+#     # convert to range 0 -> 1
+#     out_data /= 255.
+#     # stretch to range -1 -> 1
+#     out_data *= 2.
+#     out_data -= 1.
+#     return out_data
 
 
-def tensor_restore(in_tensor, clamp=True):
-    out_tensor = in_tensor
-    # multiple std
-    out_tensor[0] *= std[0]
-    out_tensor[1] *= std[1]
-    out_tensor[2] *= std[2]
-    # plus mean
-    out_tensor[0] += mean[0]
-    out_tensor[1] += mean[1]
-    out_tensor[2] += mean[2]
-    if clamp:
-        out_tensor = torch.clamp(out_tensor, min=0.0, max=1.0)
-    return out_tensor
+def image_from_flow(in_flow, channel_first):
+    assert len(in_flow.shape) == 3
+    assert isinstance(in_flow, np.ndarray)
+    if channel_first:
+        assert in_flow.shape[0] == 2
+        in_flow = np.transpose(in_flow, (1, 2, 0))
+    out_image = flow_to_image(in_flow) / 255.0
+    if channel_first:
+        out_image = np.transpose(out_image, (2, 0, 1))
+    return out_image.astype(np.float32)
+
+
+# this function focuses on two types of input:
+#   + image: input range [-1, 1]
+#   + flow: input range [any, any]
+def images_restore(in_data, clamp=True, convert_unit8=False, is_optical_flow=False):
+    if isinstance(in_data, (list, tuple)):
+        if type(in_data[0]) == np.ndarray:
+            if is_optical_flow:
+                in_data = [image_from_flow(flow, channel_first=True) for flow in in_data]
+            out_data = np.array(in_data).astype(np.float32)
+        elif type(in_data[0]) == torch.Tensor:
+            if is_optical_flow:
+                in_data = [torch.tensor(image_from_flow(flow.cpu().numpy()), channel_first=True) for flow in in_data]
+            out_data = torch.stack(in_data, dim=0).type(torch.float32)
+        else:
+            print("Unknown data type:", type(in_data[0]))
+            return in_data
+    else:
+        assert isinstance(in_data, (np.ndarray, torch.Tensor))
+        out_data = in_data.astype(np.float32) if type(in_data) == np.ndarray else in_data.type(torch.float32)
+        if is_optical_flow:
+            out_data = image_from_flow(out_data, channel_first=True) if type(in_data) == np.ndarray else \
+                       torch.tensor(image_from_flow(out_data.cpu().numpy(), channel_first=True)).type(torch.float32)
+
+    if not is_optical_flow:
+        out_data = (in_data + 1) * 0.5
+
+    if clamp or convert_unit8:
+        if type(out_data) == np.ndarray:
+            out_data = np.clip(out_data, 0., 1.)
+        elif type(out_data) == torch.Tensor:
+            out_data = torch.clamp(out_data, min=0., max=1.)
+
+    if convert_unit8:
+        if type(out_data) == np.ndarray:
+            out_data = (out_data * 255.).astype(np.uint8)
+        elif type(out_data) == torch.Tensor:
+            out_data = out_data.type(torch.uint8)
+
+    return out_data
 
 
 def freeze_all_layers(model):
@@ -44,21 +122,21 @@ def freeze_all_layers(model):
         param.requires_grad = False
 
 
-def PIL_to_CV(PIL_img):
-    if isinstance(PIL_img, str):
-        data = Image.open(PIL_img)
-    else:
-        data = PIL_img
-    return cv2.cvtColor(np.array(data), cv2.COLOR_RGB2BGR)
-
-
-def CV_to_PIL(CV_img):
-    if isinstance(CV_img, str):
-        data = cv2.imread(CV_img)
-    else:
-        data = CV_img
-    data = cv2.cvtColor(data, cv2.COLOR_BGR2RGB)
-    return Image.fromarray(data)
+# def PIL_to_CV(PIL_img):
+#     if isinstance(PIL_img, str):
+#         data = Image.open(PIL_img)
+#     else:
+#         data = PIL_img
+#     return cv2.cvtColor(np.array(data), cv2.COLOR_RGB2BGR)
+#
+#
+# def CV_to_PIL(CV_img):
+#     if isinstance(CV_img, str):
+#         data = cv2.imread(CV_img)
+#     else:
+#         data = CV_img
+#     data = cv2.cvtColor(data, cv2.COLOR_BGR2RGB)
+#     return Image.fromarray(data)
 
 
 def get_img_shape(in_shape):
@@ -67,6 +145,23 @@ def get_img_shape(in_shape):
     else:
         assert isinstance(in_shape, (list, tuple)) and len(in_shape) >= 2
         return tuple(in_shape[:2])
+
+
+# def load_video(file, im_size=None):
+#     imgs = []
+#     cap = cv2.VideoCapture(file)
+#     if not cap.isOpened():
+#         print("Error opening file", file)
+#     while cap.isOpened():
+#         ret, frame = cap.read()
+#         if ret:
+#             if im_size is not None:
+#                 frame = CV_to_PIL(cv2.resize(frame, (im_size[1], im_size[0])))
+#             imgs.append(frame)
+#         else:
+#             break
+#     cap.release()
+#     return imgs
 
 
 def load_video(file, im_size=None):
@@ -78,7 +173,7 @@ def load_video(file, im_size=None):
         ret, frame = cap.read()
         if ret:
             if im_size is not None:
-                frame = CV_to_PIL(cv2.resize(frame, (im_size[1], im_size[0])))
+                frame = cv2.resize(frame, (im_size[1], im_size[0]))
             imgs.append(frame)
         else:
             break
@@ -86,12 +181,21 @@ def load_video(file, im_size=None):
     return imgs
 
 
+# def load_imgs_in_directory(path, ext, im_size=None):
+#     files = sorted(glob.glob(path + "/*." + ext))
+#     if im_size is not None:
+#         imgs = [CV_to_PIL(cv2.resize(cv2.imread(file), (im_size[1], im_size[0]))) for file in files]
+#     else:
+#         imgs = [CV_to_PIL(cv2.imread(file)) for file in files]
+#     return imgs
+
+
 def load_imgs_in_directory(path, ext, im_size=None):
     files = sorted(glob.glob(path + "/*." + ext))
     if im_size is not None:
-        imgs = [CV_to_PIL(cv2.resize(cv2.imread(file), (im_size[1], im_size[0]))) for file in files]
+        imgs = [cv2.resize(cv2.imread(file), (im_size[1], im_size[0])) for file in files]
     else:
-        imgs = [CV_to_PIL(cv2.imread(file)) for file in files]
+        imgs = [cv2.imread(file) for file in files]
     return imgs
 
 
@@ -115,6 +219,8 @@ def plot_ROC(true_vals, pred_vals, pos_label=1):
 # image gradients along x and y axes
 # input is a batch of size (b, c, h, w)
 def image_gradient(tensor, out_abs=False):
+    if not isinstance(tensor, torch.Tensor):
+        tensor = torch.tensor(tensor)
     assert len(tensor.shape) == 4
     h, w = tensor.shape[-2:]
     left, top = tensor, tensor
@@ -122,10 +228,10 @@ def image_gradient(tensor, out_abs=False):
     bottom = F.pad(tensor, [0, 0, 0, 1])[:, :, 1:, :]
     # dx
     dx = right - left
-    dx[:, :, :, -1] = 0
+    # dx[:, :, :, -1] = 0
     # dy
     dy = bottom - top
-    dy[:, :, -1, :] = 0
+    # dy[:, :, -1, :] = 0
     #
     if out_abs:
         return torch.abs(dx), torch.abs(dy)
@@ -263,7 +369,7 @@ def summary(model, input_size, batch_size=-1, device="cuda", print_details=False
 #       ".xxx" for reading videos in the path
 class DataHelper(torch.utils.data.Dataset):
     def __init__(self, name, im_size, in_path, expected_n_clip,
-                 out_path, extension=".avi", force_calc=False):
+                 out_path, extension=".npy", force_calc=False):
         super(DataHelper, self).__init__()
         # set name and data path
         self._name = name
@@ -275,53 +381,54 @@ class DataHelper(torch.utils.data.Dataset):
         self._data_to_access = None
 
         # list of desired data files
-        self._out_data_files = [os.path.join(out_path, str(i+1).zfill(len(str(expected_n_clip))) + ".pt")
+        self._out_data_files = [os.path.join(out_path, str(i+1).zfill(len(str(expected_n_clip))) + ".npy")
                                 for i in range(expected_n_clip)]
-        file_existing = [os.path.exists(file) for file in self._out_data_files]
+        file_out_existing = [os.path.exists(file) for file in self._out_data_files]
 
         # skip processing data if all files are existed (i.e. processed)
-        if all(file_existing):
+        if all(file_out_existing):
             return
 
         # otherwise, check each clip and load/convert (if not existed)
         self._in_data_paths = sorted(glob.glob(in_path + "/*" + extension))
         assert len(self._in_data_paths) == expected_n_clip
+        if extension == ".npy" and not force_calc:  # data already prepared
+            return
 
         # check each clip
         for clip_idx in range(expected_n_clip):
-            if file_existing[clip_idx] and not force_calc:
+            if file_out_existing[clip_idx] and not force_calc:
                 continue
-            self.load_clip(clip_idx, force_calc=True)
+            self.load_clip(clip_idx, get_output=False, force_calc=True)
 
-    # process data of 1 clip and save to .pt file
+    # process data of 1 clip and save to .npy file
     # in_path: input data path (either a directory of images or a video file)
-    # out_file: path to .pt file storing preprocessed data from in_path
+    # out_file: path to .npy file storing preprocessed data from in_path
     # im_size: desired frame resolution
     def load_clip(self, clip_idx, get_output=False, force_calc=False):
         out_file = self._out_data_files[clip_idx]
 
         # clip was already processed -> just load it
         if os.path.exists(out_file) and not force_calc:
-            # print("Output file %s is already existed -> loading..." % out_file)
             if get_output:
-                return torch.load(out_file)
+                return np.load(out_file)
             else:
                 return
 
-        # do not process .pt file (original data should be images or video)
+        # do not process .npy file (original data should be images or video)
         in_path = self._in_data_paths[clip_idx]
-        if in_path[-3:] == ".pt":
-            print("Input file %s is already a .pt file -> check again" % in_path)
-            return None
+        if in_path[-4:] == ".npy":
+            # print("Input file %s is already a .npy file -> check again" % in_path)
+            # return None
+            return np.load(in_path)
 
         # process data from directory / file
         im_size = self._im_size
         if os.path.isdir(in_path):
-            data = torch.stack([tensor_normalize(datum).float()
-                                for datum in load_imgs_in_directory(in_path, "*", im_size)])
+            data = load_imgs_in_directory(in_path, "*", im_size)
         elif os.path.isfile(in_path):
-            data = torch.stack([tensor_normalize(datum).float() for datum in load_video(in_path, im_size)])
-        torch.save(data, out_file)
+            data = load_video(in_path, im_size)
+        np.save(out_file, data)
 
         # only return if necessary
         if get_output:
@@ -329,11 +436,10 @@ class DataHelper(torch.utils.data.Dataset):
 
     def set_clip_idx(self, clip_idx):
         assert clip_idx in range(len(self._out_data_files))
-        self._data_to_access = self.load_clip(clip_idx, get_output=True)
+        self._data_to_access = np.transpose(self.load_clip(clip_idx, get_output=True, force_calc=False), (0, 3, 1, 2))
 
     def __getitem__(self, index):
         assert self._data_to_access is not None
-        # assert index in range(len(self._data_to_access))
         return self._data_to_access[index]
 
     def __len__(self):
@@ -341,7 +447,7 @@ class DataHelper(torch.utils.data.Dataset):
 
 
 # Class defining specific dataset for training and evaluation
-# data_path: path that processed data files (.pt) are stored
+# data_path: path that processed data files (.npy) are stored
 # mode: this controller is for training or evaluation (for simplifying operations)
 class DatasetDefiner():
     def __init__(self, name, im_size, data_path, mode):

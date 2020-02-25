@@ -134,7 +134,7 @@ class GTNet(nn.Module):
         # set groundtruth model for context
         # get first 19 layers
         self.context_model = SemaNet(self.IM_SIZE, backbone="VGG19",
-                                     reduction=8, n_layer_desire=19)
+                                     reduction=8, n_layer_desire=19, device=self.device)
         self.context_out_shape = self.context_model.get_summary(prt_summary)[-1]
         #
         self.to(self.device)
@@ -144,14 +144,14 @@ class GTNet(nn.Module):
         return out_size
 
     def forward(self, x):
-        context, _ = self.context_model.estimate(x, is_cv_img=False,
-                                                 need_normalize=False)
+        context, _ = self.context_model.estimate(x)
         return context
 
 
 class AnomaNet(nn.Module):
-    def __init__(self, im_size, device, prt_summary=True):
+    def __init__(self, im_size, device, use_optical_flow=True, prt_summary=True):
         super().__init__()
+        self.use_optical_flow = use_optical_flow
         # set device & input shape
         self.device = device
         self.IM_SIZE = get_img_shape(im_size)
@@ -239,8 +239,11 @@ class AnomaNet(nn.Module):
         C_out_inst_dec_2 = 2 * C_enc
 
         # instant prediction result
-        self.instant_dec_3 = nn.Sequential(nn.Conv2d(2*C_enc, 3, kernel_size=3, stride=1, padding=1),
-                                           nn.Tanh())
+        if not use_optical_flow:
+            self.instant_dec_3 = nn.Sequential(nn.Conv2d(2*C_enc, 3, kernel_size=3, stride=1, padding=1),
+                                               nn.Tanh())   # RGB frame
+        else:
+            self.instant_dec_3 = nn.Conv2d(2*C_enc, 2, kernel_size=3, stride=1, padding=1)  # d_x, d_y
 
         # Long-term prediction
         # D(i) -> (RNN)
@@ -251,7 +254,8 @@ class AnomaNet(nn.Module):
                                hidden_channel=hidden_channel,
                                kernel_size=(3, 3),
                                bias=True)
-        self.RNN_hidden = torch.autograd.Variable(torch.zeros(1, hidden_channel, RNN_input_size[0], RNN_input_size[1])).to(self.device)
+        self.RNN_hidden = torch.autograd.Variable(
+            torch.zeros(1, hidden_channel, RNN_input_size[0], RNN_input_size[1])).to(self.device)
 
         # (RNN) -> F'(i+1)
         C_out = hidden_channel
@@ -268,8 +272,12 @@ class AnomaNet(nn.Module):
                                         nn.LeakyReLU(negative_slope=0.2),  # end block 2
                                         nn.ConvTranspose2d(C_out//4, C_out//4, kernel_size=2, stride=2, padding=0))
         # longterm prediction result
-        self.post_RNN_3 = nn.Sequential(nn.Conv2d(C_out//4 + C_out_inst_dec_2, 3, kernel_size=3, stride=1, padding=1),
-                                        nn.Tanh())
+        if not use_optical_flow:
+            self.post_RNN_3 = nn.Sequential(nn.Conv2d(C_out//4 + C_out_inst_dec_2, 3, kernel_size=3, stride=1, padding=1),
+                                            nn.Tanh())
+        else:
+            self.post_RNN_3 = nn.Conv2d(C_out//4 + C_out_inst_dec_2, 2, kernel_size=3, stride=1, padding=1)
+
         self.to(self.device)
         #
         if prt_summary:
