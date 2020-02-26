@@ -4,10 +4,8 @@ import torch
 import os
 import sys
 import re
-# from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
-# import torchvision.transforms as transforms
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score, roc_curve
@@ -16,52 +14,6 @@ from collections import OrderedDict
 
 from flowlib import flow_to_image
 from CONFIG import data_info
-
-# # mean = torch.tensor([0.485, 0.456, 0.406])
-# # std = torch.tensor([0.229, 0.224, 0.225])
-#
-# mean = torch.tensor([0.5, 0.5, 0.5])
-# std = torch.tensor([0.5, 0.5, 0.5])
-#
-# tensor_normalize = transforms.Compose([transforms.ToTensor(),
-#                                        transforms.Normalize(mean=mean,
-#                                                             std=std)])
-#
-#
-# def tensor_restore(in_tensor, clamp=True):
-#     out_tensor = in_tensor
-#     # multiple std
-#     out_tensor[0] *= std[0]
-#     out_tensor[1] *= std[1]
-#     out_tensor[2] *= std[2]
-#     # plus mean
-#     out_tensor[0] += mean[0]
-#     out_tensor[1] += mean[1]
-#     out_tensor[2] += mean[2]
-#     if clamp:
-#         out_tensor = torch.clamp(out_tensor, min=0.0, max=1.0)
-#     return out_tensor
-
-
-# def images_normalize(in_data):
-#     if isinstance(in_data, (list, tuple)):
-#         if type(in_data[0]) == np.ndarray:
-#             out_data = np.array(in_data).astype(np.float32)
-#         elif type(in_data[0]) == torch.Tensor:
-#             out_data = torch.stack(in_data, dim=0)
-#         else:
-#             print("Unknown data type:", type(in_data[0]))
-#             return in_data
-#     else:
-#         assert isinstance(in_data, (np.ndarray, torch.Tensor))
-#         out_data = in_data
-#
-#     # convert to range 0 -> 1
-#     out_data /= 255.
-#     # stretch to range -1 -> 1
-#     out_data *= 2.
-#     out_data -= 1.
-#     return out_data
 
 
 def image_from_flow(in_flow, channel_first):
@@ -122,46 +74,12 @@ def freeze_all_layers(model):
         param.requires_grad = False
 
 
-# def PIL_to_CV(PIL_img):
-#     if isinstance(PIL_img, str):
-#         data = Image.open(PIL_img)
-#     else:
-#         data = PIL_img
-#     return cv2.cvtColor(np.array(data), cv2.COLOR_RGB2BGR)
-#
-#
-# def CV_to_PIL(CV_img):
-#     if isinstance(CV_img, str):
-#         data = cv2.imread(CV_img)
-#     else:
-#         data = CV_img
-#     data = cv2.cvtColor(data, cv2.COLOR_BGR2RGB)
-#     return Image.fromarray(data)
-
-
 def get_img_shape(in_shape):
     if isinstance(in_shape, int):
         return (in_shape, in_shape)
     else:
         assert isinstance(in_shape, (list, tuple)) and len(in_shape) >= 2
         return tuple(in_shape[:2])
-
-
-# def load_video(file, im_size=None):
-#     imgs = []
-#     cap = cv2.VideoCapture(file)
-#     if not cap.isOpened():
-#         print("Error opening file", file)
-#     while cap.isOpened():
-#         ret, frame = cap.read()
-#         if ret:
-#             if im_size is not None:
-#                 frame = CV_to_PIL(cv2.resize(frame, (im_size[1], im_size[0])))
-#             imgs.append(frame)
-#         else:
-#             break
-#     cap.release()
-#     return imgs
 
 
 def load_video(file, im_size=None):
@@ -179,15 +97,6 @@ def load_video(file, im_size=None):
             break
     cap.release()
     return imgs
-
-
-# def load_imgs_in_directory(path, ext, im_size=None):
-#     files = sorted(glob.glob(path + "/*." + ext))
-#     if im_size is not None:
-#         imgs = [CV_to_PIL(cv2.resize(cv2.imread(file), (im_size[1], im_size[0]))) for file in files]
-#     else:
-#         imgs = [CV_to_PIL(cv2.imread(file)) for file in files]
-#     return imgs
 
 
 def load_imgs_in_directory(path, ext, im_size=None):

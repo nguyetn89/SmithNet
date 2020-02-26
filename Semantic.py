@@ -117,17 +117,3 @@ class SemanticNet(nn.Module):
             if scaled_features is not None:
                 print("scaled shape:", scaled_features.shape)
         return features, scaled_features
-
-
-# def simple_test():
-#     SCALE = 0.09
-#     img_path = './../test-images/office/15.png'
-#     image = cv2.resize(cv2.imread(img_path), (0, 0), fx=SCALE, fy=SCALE)
-#     in_shape = image.shape[:2]
-#     estimator = SemanticNet(in_shape, backbone="VGG19", reduction=8)
-#     estimator.get_summary(print_details=True)
-#     estimator.estimate([image, cv2.flip(image, 1)], upscale=1)
-#
-#
-# if __name__ == "__main__":
-#     simple_test()
