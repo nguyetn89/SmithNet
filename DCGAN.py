@@ -193,14 +193,8 @@ class DCGAN(object):
             # process each clip
             for clip_idx in clip_order:
                 dataset.load_data(clip_idx)
-                # adapt batch_size
-                tmp_batch_size = batch_size
-                # last frame does not have optical flow
-                possible_length_data = len(dataset.training_data) - (1 if self.use_optical_flow else 0)
-                while possible_length_data % tmp_batch_size == 1 and tmp_batch_size > 2:
-                    tmp_batch_size -= 1
                 # >>>>>>>> TODO: check whether it is better if shuffle is True <<<<<<<<<
-                dataloader = torch.utils.data.DataLoader(dataset.training_data, tmp_batch_size, shuffle=False)
+                dataloader = torch.utils.data.DataLoader(dataset.training_data, batch_size, shuffle=False)
                 #
                 d_loss_real, d_loss_fake = 0, 0
                 g_loss, d_loss = 0, 0
@@ -210,6 +204,9 @@ class DCGAN(object):
                 # process batch
                 msg = ""
                 for data_batch in dataloader:
+                    # skip last batch with very few samples
+                    if len(data_batch) < 3:
+                        continue
                     # normalize data to range [0, 1] and then [-1, 1]
                     imgs = data_batch[:, :3, :, :].to(self.device) / 255.
                     imgs *= 2.
@@ -220,12 +217,6 @@ class DCGAN(object):
                         assert len(imgs) == len(flows)
                         if torch.sum(torch.abs(flows[-1])) == 0.0:
                             imgs, flows = imgs[:-1], flows[:-1]
-                        if len(imgs) == 0 or len(flows) == 0:
-                            continue
-
-                    if len(data_batch) < 2:
-                        print("WARNING: len(data_batch) = %d < 2" % len(data_batch))    # just for test
-                        continue
 
                     # ============================== Discriminator optimizing ==============================
 
@@ -344,20 +335,7 @@ class DCGAN(object):
                                  "D_optim_epoch_%s.pkl" % str(epoch + 1).zfill(LEN_ZFILL),
                                  iter_count=iter_count)
 
-                # Denormalize images and save them in grid 8x8
-                # images_to_save = [[images_restore(imgs.data[0].cpu()),
-                #                    images_restore(out_reconstruction.data[0].cpu()),
-                #                    images_restore(imgs.data[1].cpu()),
-                #                    images_restore(out_instant_pred.data[0].cpu(), is_optical_flow=True),
-                #                    images_restore(out_longterm_pred.data[0].cpu(), is_optical_flow=True)],
-                #                   [images_restore(imgs.data[-2].cpu()),
-                #                    images_restore(out_reconstruction.data[-2].cpu()),
-                #                    images_restore(imgs.data[-1].cpu()),
-                #                    images_restore(out_instant_pred.data[-2].cpu(), is_optical_flow=True),
-                #                    images_restore(out_longterm_pred.data[-2].cpu(), is_optical_flow=True)]]
-                # # print([x.shape for x in images_to_save[0]], [x.shape for x in images_to_save[1]])
-                # images_to_save = [utils.make_grid(images, nrow=1) for images in images_to_save]
-                # grid = utils.make_grid(images_to_save, nrow=2)
+                # Denormalize images and save them in grid
                 images_to_save = [images_restore(imgs.data[0].cpu()),
                                   images_restore(out_reconstruction.data[0].cpu()),
                                   images_restore(imgs.data[1].cpu()),
@@ -440,11 +418,17 @@ class DCGAN(object):
                     print("Data saved to %s" % out_file)
 
                 # save example image
-                images_to_save = [images_restore(imgs.data[-2].cpu().numpy()),
-                                  images_restore(data["reconst"][-2]),
-                                  images_restore(imgs.data[-1].cpu().numpy()),
-                                  images_restore(data["instant"][-2], is_optical_flow=self.use_optical_flow),
-                                  images_restore(data["longterm"][-2], is_optical_flow=self.use_optical_flow)]
+                if len(imgs) > 1:
+                    images_to_save = [images_restore(imgs.data[-2].cpu().numpy()),
+                                      images_restore(data["reconst"][-2]),
+                                      images_restore(imgs.data[-1].cpu().numpy()),
+                                      images_restore(data["instant"][-2], is_optical_flow=self.use_optical_flow),
+                                      images_restore(data["longterm"][-2], is_optical_flow=self.use_optical_flow)]
+                else:
+                    images_to_save = [images_restore(imgs.data[0].cpu().numpy()),
+                                      images_restore(data["reconst"][0]),
+                                      images_restore(data["instant"][0], is_optical_flow=self.use_optical_flow),
+                                      images_restore(data["longterm"][0], is_optical_flow=self.use_optical_flow)]
                 grid = utils.make_grid([torch.tensor(image) for image in images_to_save], nrow=1)
                 out_file = os.path.join(out_path, '%s.png' % str(clip_idx + 1).zfill(len(str(n_clip))))
                 utils.save_image(grid, out_file)
@@ -460,7 +444,7 @@ class DCGAN(object):
     # function for computing anomaly score
     # input tensor shape: (n, C, H, W)
     # power: used for combining channels (1=abs, 2=square)
-    def _calc_score(self, tensor, power=1, patch_size=5):
+    def _calc_score(self, tensor, power, patch_size, stride):
         if not isinstance(tensor, torch.Tensor):
             tensor = torch.tensor(tensor)
         assert power in (1, 2) and patch_size % 2
@@ -470,7 +454,7 @@ class DCGAN(object):
         # convolution for most salient patch
         weight = torch.ones(1, 1, patch_size, patch_size)
         padding = patch_size // 2
-        heatmaps = F.conv2d(tensor2, weight, stride=1, padding=padding).numpy()
+        heatmaps = F.conv2d(tensor2, weight, stride=stride, padding=padding).numpy()
         # get sum value and position of the patch
         scores = [np.max(heatmap) for heatmap in heatmaps]
         positions = [np.where(heatmap == np.max(heatmap)) for heatmap in heatmaps]
@@ -479,7 +463,7 @@ class DCGAN(object):
         return {"score": scores, "position": positions}
 
     # evaluation from frame-level groundtruth and (real eval data, output eval data)
-    def evaluate(self, epoch):
+    def evaluate(self, epoch, power=1, patch_size=5, stride=1):
         dataset = DatasetDefiner(self.name, self.im_size, self.evaluation_store_path, mode="eval")
         n_clip = dataset.get_info("n_clip_test")
         reconst_scores, instant_scores, longterm_scores = [], [], []
@@ -495,16 +479,27 @@ class DCGAN(object):
             # get output results
             output_path = self.output_store_path + '/out_epoch_%s/test' % str(epoch).zfill(LEN_ZFILL)
             output_file = os.path.join(output_path, '%s.npy' % str(clip_idx + 1).zfill(len(str(n_clip))))
-            output_data = np.load(output_file).item()
+            output_data = np.load(output_file, allow_pickle=True).item()
 
             # calc difference tensor and patch scores
-            reconst_scores.append(self._calc_score(output_data["reconst"][:-1] - imgs[:-1])["score"])
+            reconst_scores.append(self._calc_score(output_data["reconst"][:-1] - imgs[:-1],
+                                                   power, patch_size, stride)["score"])
             if not self.use_optical_flow:
-                instant_scores.append(self._calc_score(output_data["instant"][:-1] - imgs[1:])["score"])
-                longterm_scores.append(self._calc_score(output_data["longterm"][:-1] - imgs[1:])["score"])
+                instant_scores.append(self._calc_score(output_data["instant"][:-1] - imgs[1:],
+                                                       power, patch_size, stride)["score"])
+                longterm_scores.append(self._calc_score(output_data["longterm"][:-1] - imgs[1:],
+                                                        power, patch_size, stride)["score"])
             else:
-                instant_scores.append(self._calc_score(output_data["instant"][:-1] - flows[:-1])["score"])
-                longterm_scores.append(self._calc_score(output_data["longterm"][:-1] - flows[:-1])["score"])
+                instant_scores.append(self._calc_score(output_data["instant"][:-1] - flows[:-1],
+                                                       power, patch_size, stride)["score"])
+                longterm_scores.append(self._calc_score(output_data["longterm"][:-1] - flows[:-1],
+                                                        power, patch_size, stride)["score"])
 
         # return auc(s)
-        return dataset.evaluate(reconst_scores), dataset.evaluate(instant_scores), dataset.evaluate(longterm_scores)
+        auc_reconst_norm = dataset.evaluate(reconst_scores, normalize_each_clip=True)
+        auc_reconst = dataset.evaluate(reconst_scores, normalize_each_clip=False)
+        auc_instant_norm = dataset.evaluate(instant_scores, normalize_each_clip=True)
+        auc_instant = dataset.evaluate(instant_scores, normalize_each_clip=False)
+        auc_longterm_norm = dataset.evaluate(longterm_scores, normalize_each_clip=True)
+        auc_longterm = dataset.evaluate(longterm_scores, normalize_each_clip=False)
+        return auc_reconst_norm, auc_reconst, auc_instant_norm, auc_instant, auc_longterm_norm, auc_longterm

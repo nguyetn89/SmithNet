@@ -63,8 +63,11 @@ def run(params):
     elif task == "eval":
         print("========== Mode: Evaluation ==========")
         _, epoch_eval = get_epoch_info(params["epoch"])
+        power = params["power"]
+        patch_size = params["patch"]
+        stride = params["stride"]
         print("Epoch %d" % epoch_eval)
-        AUCs = controller.evaluate(epoch_eval)
+        AUCs = controller.evaluate(epoch_eval, power, patch_size, stride)
         print("Epoch", epoch_eval)
         print("AUCs:", AUCs)
     else:
@@ -85,6 +88,9 @@ if __name__ == "__main__":
     parser.add_argument("--progressbar", type=int, default=0)
     parser.add_argument("--method", type=str, default="DCGAN")
     parser.add_argument("--workspace", type=str, default="./workspace_flow")
+    parser.add_argument("--power", type=int, default=1)
+    parser.add_argument("--patch", type=int, default=5)
+    parser.add_argument("--stride", type=int, default=1)
     args = vars(parser.parse_args())
     # validate arguments
     assert args["dataset"] in data_info

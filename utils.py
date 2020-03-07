@@ -4,6 +4,7 @@ import torch
 import os
 import sys
 import re
+import copy
 import numpy as np
 import matplotlib.pyplot as plt
 import torch.nn as nn
@@ -404,8 +405,9 @@ class DatasetDefiner():
 
     # clip_results: sequence of anomaly scores (clips) for the whole test set
     # clip_results must be an array of arrays (either numpy or torch tensor)
-    def evaluate(self, clip_results, normalize_each_clip=True):
-        assert len(clip_results) == self._n_clip_test
+    def evaluate(self, clip_results_raw, normalize_each_clip):
+        assert len(clip_results_raw) == self._n_clip_test
+        clip_results = copy.deepcopy(clip_results_raw)
         groundtruths = [np.zeros_like(clip_result) for clip_result in clip_results]
         # set frame-level groundtruth scores
         for clip_idx in range(len(self._eval_groundtruth_clips)):
