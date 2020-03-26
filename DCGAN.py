@@ -30,20 +30,20 @@ class Discriminator(nn.Module):
         in_channel = 5 if self.use_optical_flow else 6
         n_base_channel = 16 * 4  # no. of channels to start
         self.network = nn.Sequential(nn.Conv2d(in_channel, n_base_channel, kernel_size=3, stride=1, padding=1),  # end block 0
-                                     nn.Conv2d(n_base_channel, 2*n_base_channel, kernel_size=2, stride=2, padding=0),
+                                     nn.Conv2d(n_base_channel, 2*n_base_channel, kernel_size=4, stride=2, padding=1),
                                      nn.Conv2d(2*n_base_channel, 2*n_base_channel, kernel_size=3, stride=1, padding=1),
                                      nn.LeakyReLU(negative_slope=0.2, inplace=True),  # end block 1
-                                     nn.Conv2d(2*n_base_channel, 4*n_base_channel, kernel_size=2, stride=2, padding=0),
+                                     nn.Conv2d(2*n_base_channel, 4*n_base_channel, kernel_size=4, stride=2, padding=1),
                                      ExpandedSE(4*n_base_channel, self.IM_SIZE[0]//4, self.IM_SIZE[1]//4, case="both"),  # expanded SE
                                      nn.Conv2d(4*n_base_channel, 4*n_base_channel, kernel_size=3, stride=1, padding=1),
                                      nn.BatchNorm2d(num_features=4*n_base_channel),
                                      nn.LeakyReLU(negative_slope=0.2, inplace=True),  # end block 2
-                                     nn.Conv2d(4*n_base_channel, 8*n_base_channel, kernel_size=2, stride=2, padding=0),
+                                     nn.Conv2d(4*n_base_channel, 8*n_base_channel, kernel_size=4, stride=2, padding=1),
                                      ExpandedSE(8*n_base_channel, self.IM_SIZE[0]//8, self.IM_SIZE[1]//8, case="both"),  # expanded SE
                                      nn.Conv2d(8*n_base_channel, 8*n_base_channel, kernel_size=3, stride=1, padding=1),
                                      nn.BatchNorm2d(num_features=8*n_base_channel),
                                      nn.LeakyReLU(negative_slope=0.2, inplace=True),  # end block 3
-                                     nn.Conv2d(8*n_base_channel, 16*n_base_channel, kernel_size=2, stride=2, padding=0),
+                                     nn.Conv2d(8*n_base_channel, 16*n_base_channel, kernel_size=4, stride=2, padding=1),
                                      ExpandedSE(16*n_base_channel, self.IM_SIZE[0]//16, self.IM_SIZE[1]//16, case="both"),  # expanded SE
                                      nn.Conv2d(16*n_base_channel, 16*n_base_channel, kernel_size=3, stride=1, padding=1),
                                      nn.Conv2d(16*n_base_channel, n_base_channel//2, kernel_size=3, stride=1, padding=1))  # end block 4
@@ -60,8 +60,11 @@ class Discriminator(nn.Module):
 
 # name: dataset's name
 class DCGAN(object):
-    def __init__(self, name, im_size, store_path, use_optical_flow=True, device_str=None, use_progress_bar=True):
+    def __init__(self, name, im_size, store_path, use_optical_flow, use_UNET, use_cross_pred,
+                 device_str=None, use_progress_bar=True):
         self.use_optical_flow = use_optical_flow
+        self.use_UNET = use_UNET
+        self.use_cross_pred = use_cross_pred
         self.use_progress_bar = use_progress_bar
         #
         self.name = name
@@ -90,7 +93,7 @@ class DCGAN(object):
         self.ContextNet.eval()
 
         print("DCGAN init...")
-        self.G = Generator(self.im_size, self.device, self.use_optical_flow)
+        self.G = Generator(self.im_size, self.device, self.use_optical_flow, self.use_UNET, self.use_cross_pred)
         self.D = Discriminator(self.im_size, self.device, self.use_optical_flow)
         self.loss = nn.BCEWithLogitsLoss()  # BCEWithLogitsLoss replacing BCELoss
 

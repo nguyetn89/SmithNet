@@ -15,6 +15,15 @@ torch.manual_seed(2020)
 np.random.seed(2020)
 
 
+def print_params(params):
+    print("dataset: %s | task: %s | epoch: %s" % (params["dataset"], params["task"], params["epoch"]))
+    print("method: %s | workspace: %s" % (params["method"], params["workspace"]))
+    print("height: %d | width: %d | batch: %d" % (params["height"], params["width"], params["batch"]))
+    print("optical: %d | unet: %s | cross: %d" % (params["optical"], params["unet"], params["cross_pred"]))
+    if params["task"] == "eval":
+        print("power: %d | patch: %d | stride: %d" % (params["power"], params["patch"], params["stride"]))
+
+
 def get_epoch_info(epoch_str):
     if '-' in epoch_str:
         vals = epoch_str.split('-')
@@ -32,6 +41,8 @@ def run(params):
     im_size = (params["height"], params["width"])
     store_path = params["workspace"]
     use_optical_flow = params["optical"] != 0
+    use_UNET = params["unet"]
+    use_cross_pred = params["cross_pred"] != 0
     use_progress_bar = params["progressbar"] != 0
     # init model controller
     if method == "WGAN":
@@ -44,7 +55,9 @@ def run(params):
         return
     else:
         controller = DCGAN(dataset, im_size, store_path,
-                           use_optical_flow=use_optical_flow,
+                           use_optical_flow,
+                           use_UNET,
+                           use_cross_pred,
                            use_progress_bar=use_progress_bar)
     #
     if task == "train":
@@ -84,6 +97,8 @@ if __name__ == "__main__":
     parser.add_argument("--epoch", type=str, default=None)
     parser.add_argument("--batch", type=int, default=4)
     parser.add_argument("--optical", type=int, default=1)
+    parser.add_argument("--unet", type=str, default="none")
+    parser.add_argument("--cross_pred", type=int, default=1)
     parser.add_argument("--every", type=int, default=5)
     parser.add_argument("--progressbar", type=int, default=0)
     parser.add_argument("--method", type=str, default="DCGAN")
@@ -91,6 +106,7 @@ if __name__ == "__main__":
     parser.add_argument("--power", type=int, default=1)
     parser.add_argument("--patch", type=int, default=5)
     parser.add_argument("--stride", type=int, default=1)
+    parser.add_argument("--print", type=int, default=1)
     args = vars(parser.parse_args())
     # validate arguments
     assert args["dataset"] in data_info
@@ -99,4 +115,6 @@ if __name__ == "__main__":
     assert args["batch"] > 1
     assert args["method"] in ["DCGAN", "WGAN", "NoGAN"]
     #
+    if args["print"] != 0:
+        print_params(args)
     run(args)
