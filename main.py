@@ -19,7 +19,7 @@ def print_params(params):
     print("dataset: %s | task: %s | epoch: %s" % (params["dataset"], params["task"], params["epoch"]))
     print("method: %s | workspace: %s" % (params["method"], params["workspace"]))
     print("height: %d | width: %d | batch: %d" % (params["height"], params["width"], params["batch"]))
-    print("optical: %d | unet: %s | cross: %d" % (params["optical"], params["unet"], params["cross_pred"]))
+    # print("optical: %d | unet: %s | cross: %d" % (params["optical"], params["unet"], params["cross_pred"]))
     if params["task"] == "eval":
         print("power: %d | patch: %d | stride: %d" % (params["power"], params["patch"], params["stride"]))
 
@@ -40,9 +40,9 @@ def run(params):
     method = params["method"]
     im_size = (params["height"], params["width"])
     store_path = params["workspace"]
-    use_optical_flow = params["optical"] != 0
-    use_UNET = params["unet"]
-    use_cross_pred = params["cross_pred"] != 0
+    # use_optical_flow = params["optical"] != 0
+    # use_UNET = params["unet"]
+    # use_cross_pred = params["cross_pred"] != 0
     use_progress_bar = params["progressbar"] != 0
     # init model controller
     if method == "WGAN":
@@ -55,9 +55,9 @@ def run(params):
         return
     else:
         controller = DCGAN(dataset, im_size, store_path,
-                           use_optical_flow,
-                           use_UNET,
-                           use_cross_pred,
+                           # use_optical_flow,
+                           # use_UNET,
+                           # use_cross_pred,
                            use_progress_bar=use_progress_bar)
     #
     if task == "train":
@@ -72,7 +72,7 @@ def run(params):
         _, epoch_eval = get_epoch_info(params["epoch"])
         print("Epoch %d" % epoch_eval)
         batch_size = params["batch"]
-        controller.infer(epoch_eval, batch_size, data_set=params["subset"])
+        controller.infer(epoch_eval, batch_size, part=params["subset"])
     elif task == "eval":
         print("========== Mode: Evaluation ==========")
         _, epoch_eval = get_epoch_info(params["epoch"])
@@ -80,7 +80,7 @@ def run(params):
         patch_size = params["patch"]
         stride = params["stride"]
         print("Epoch %d" % epoch_eval)
-        AUCs = controller.evaluate(epoch_eval, power, patch_size, stride)
+        AUCs = controller.evaluate(epoch_eval, patch_size, stride, power)
         print("Epoch", epoch_eval)
         print("AUCs:", AUCs)
     else:
@@ -93,17 +93,14 @@ if __name__ == "__main__":
     parser.add_argument("--height", type=int, default=128)
     parser.add_argument("--width", type=int, default=192)
     parser.add_argument("--task", type=str, default=None)
-    parser.add_argument("--subset", type=str, default="test_set")
+    parser.add_argument("--subset", type=str, default="test")
     parser.add_argument("--epoch", type=str, default=None)
     parser.add_argument("--batch", type=int, default=4)
-    parser.add_argument("--optical", type=int, default=1)
-    parser.add_argument("--unet", type=str, default="none")
-    parser.add_argument("--cross_pred", type=int, default=1)
     parser.add_argument("--every", type=int, default=5)
     parser.add_argument("--progressbar", type=int, default=0)
     parser.add_argument("--method", type=str, default="DCGAN")
-    parser.add_argument("--workspace", type=str, default="./workspace_flow")
-    parser.add_argument("--power", type=int, default=1)
+    parser.add_argument("--workspace", type=str, default="./workspace_ICCV_extend")
+    parser.add_argument("--power", type=int, default=2)
     parser.add_argument("--patch", type=int, default=5)
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--print", type=int, default=1)
@@ -111,7 +108,7 @@ if __name__ == "__main__":
     # validate arguments
     assert args["dataset"] in data_info
     assert args["task"] in ["train", "infer", "eval"]
-    assert args["subset"] in ["training_set", "test_set"]
+    assert args["subset"] in ["train", "test"]
     assert args["batch"] > 1
     assert args["method"] in ["DCGAN", "WGAN", "NoGAN"]
     #

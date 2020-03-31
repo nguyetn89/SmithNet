@@ -3,6 +3,7 @@ import glob
 import torch
 import os
 import sys
+import time
 import re
 import copy
 import numpy as np
@@ -17,15 +18,34 @@ from flowlib import flow_to_image
 from CONFIG import data_info
 
 
+def extend_flow_channel_in_batch(in_flows, channel_first=True):
+    assert len(in_flows.shape) == 4
+    if in_flows.shape[1] == 3:
+        return in_flows
+    elif in_flows.shape[1] == 2:
+        # magnitudes = torch.stack([torch.sum(flow**2, dim=0)**0.5 for flow in in_flows])
+        if isinstance(in_flows, torch.Tensor):
+            magnitudes = torch.sum(in_flows**2, dim=1, keepdim=True)**0.5
+            return torch.cat([in_flows, magnitudes], dim=1)
+        elif isinstance(in_flows, np.ndarray):
+            magnitudes = np.sum(in_flows**2, axis=1, keepdims=True)**0.5
+            return np.concatenate([in_flows, magnitudes], axis=1)
+        else:
+            print("Unsupported data type:", type(in_flows))
+    else:
+        print("Unknown batch of optical flows shape:", in_flows.shape)
+        return in_flows
+
+
 def image_from_flow(in_flow, channel_first):
     assert len(in_flow.shape) == 3
     assert isinstance(in_flow, np.ndarray)
     if channel_first:
-        assert in_flow.shape[0] == 2
-        in_flow = np.transpose(in_flow, (1, 2, 0))
-    out_image = flow_to_image(in_flow) / 255.0
-    if channel_first:
+        assert in_flow.shape[0] in (2, 3)
+        out_image = flow_to_image(np.transpose(in_flow, (1, 2, 0))) / 255.0
         out_image = np.transpose(out_image, (2, 0, 1))
+    else:
+        out_image = flow_to_image(in_flow) / 255.0
     return out_image.astype(np.float32)
 
 
@@ -36,14 +56,18 @@ def images_restore(in_data, clamp=True, convert_unit8=False, is_optical_flow=Fal
     if isinstance(in_data, (list, tuple)):
         if type(in_data[0]) == np.ndarray:
             if is_optical_flow:
-                in_data = [image_from_flow(flow, channel_first=True) for flow in in_data]
-            out_data = np.array(in_data).astype(np.float32)
+                out_data = np.array([image_from_flow(flow, channel_first=True)
+                                     for flow in in_data]).astype(np.float32)
+            else:
+                out_data = np.array(in_data).astype(np.float32)
         elif type(in_data[0]) == torch.Tensor:
             if is_optical_flow:
-                in_data = [torch.tensor(image_from_flow(flow.cpu().numpy()), channel_first=True) for flow in in_data]
-            out_data = torch.stack(in_data, dim=0).type(torch.float32)
+                out_data = torch.stack([torch.tensor(image_from_flow(flow.cpu().numpy()), channel_first=True)
+                                        for flow in in_data], dim=0).type(torch.float32)
+            else:
+                out_data = torch.stack(in_data, dim=0).type(torch.float32)
         else:
-            print("Unknown data type:", type(in_data[0]))
+            print("Unsupported data type:", type(in_data[0]))
             return in_data
     else:
         assert isinstance(in_data, (np.ndarray, torch.Tensor))
@@ -53,7 +77,7 @@ def images_restore(in_data, clamp=True, convert_unit8=False, is_optical_flow=Fal
                        torch.tensor(image_from_flow(out_data.cpu().numpy(), channel_first=True)).type(torch.float32)
 
     if not is_optical_flow:
-        out_data = (in_data + 1) * 0.5
+        out_data = (out_data + 1.) * 0.5
 
     if clamp or convert_unit8:
         if type(out_data) == np.ndarray:
@@ -90,6 +114,7 @@ def load_video(file, im_size=None):
         print("Error opening file", file)
     while cap.isOpened():
         ret, frame = cap.read()
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         if ret:
             if im_size is not None:
                 frame = cv2.resize(frame, (im_size[1], im_size[0]))
@@ -103,9 +128,9 @@ def load_video(file, im_size=None):
 def load_imgs_in_directory(path, ext, im_size=None):
     files = sorted(glob.glob(path + "/*." + ext))
     if im_size is not None:
-        imgs = [cv2.resize(cv2.imread(file), (im_size[1], im_size[0])) for file in files]
+        imgs = [cv2.resize(cv2.cvtColor(cv2.imread(file), cv2.COLOR_BGR2RGB), (im_size[1], im_size[0])) for file in files]
     else:
-        imgs = [cv2.imread(file) for file in files]
+        imgs = [cv2.cvtColor(cv2.imread(file), cv2.COLOR_BGR2RGB) for file in files]
     return imgs
 
 
@@ -361,7 +386,7 @@ class DataHelper(torch.utils.data.Dataset):
 # mode: this controller is for training or evaluation (for simplifying operations)
 class DatasetDefiner():
     def __init__(self, name, im_size, data_path, mode):
-        assert mode in ("train", "eval")
+        assert mode in ("train", "test")
         self._mode = mode
 
         assert name in ("UCSDped1", "UCSDped2",
@@ -374,39 +399,23 @@ class DatasetDefiner():
         self._data_path = data_path
         self._im_size = im_size
         # data controllers
-        self.training_data = None
-        self.evaluation_data = None
+        self.data = {"train": None, "test": None}
         # set dataset attributes
         self._set_dataset_attributes()
 
     def load_data(self, clip_idx):
-        if self._mode == "train":
-            self._load_training_data(clip_idx)
-        else:
-            self._load_evaluation_data(clip_idx)
-
-    # create data helper for training set
-    def _load_training_data(self, clip_idx):
-        assert clip_idx in range(self._n_clip_train)
-        if self.training_data is None:
-            self.training_data = DataHelper(self._name, self._im_size, self._training_path,
-                                            self._n_clip_train, out_path=self._data_path,
-                                            extension=self._extension)
-        self.training_data.set_clip_idx(clip_idx)
-
-    # create data helper for evaluation set
-    def _load_evaluation_data(self, clip_idx):
-        assert clip_idx in range(self._n_clip_test)
-        if self.evaluation_data is None:
-            self.evaluation_data = DataHelper(self._name, self._im_size, self._evaluation_path,
-                                              self._n_clip_test, out_path=self._data_path,
-                                              extension=self._extension)
-        self.evaluation_data.set_clip_idx(clip_idx)
+        part = self._mode
+        assert clip_idx in range(self._n_clip[part])
+        if self.data[part] is None:
+            self.data[part] = DataHelper(self._name, self._im_size, self._path[part],
+                                         self._n_clip[part], out_path=self._data_path,
+                                         extension=self._extension)
+        self.data[part].set_clip_idx(clip_idx)
 
     # clip_results: sequence of anomaly scores (clips) for the whole test set
     # clip_results must be an array of arrays (either numpy or torch tensor)
     def evaluate(self, clip_results_raw, normalize_each_clip):
-        assert len(clip_results_raw) == self._n_clip_test
+        assert len(clip_results_raw) == self._n_clip["test"]
         clip_results = copy.deepcopy(clip_results_raw)
         groundtruths = [np.zeros_like(clip_result) for clip_result in clip_results]
         # set frame-level groundtruth scores
@@ -419,7 +428,7 @@ class DatasetDefiner():
                 groundtruths[clip_idx][start:end] = 1
             if normalize_each_clip:
                 clip_results[clip_idx] = \
-                    (clip_results[clip_idx] - min(clip_results[clip_idx]))/(max(clip_results[clip_idx]) - min(clip_results[clip_idx]))
+                    (clip_results[clip_idx] - 0*min(clip_results[clip_idx]))/(max(clip_results[clip_idx]) - 0*min(clip_results[clip_idx]))
         # flatten groundtruth and predicted scores for evaluation
         true_results = np.concatenate(groundtruths, axis=0)
         pred_results = np.concatenate(clip_results, axis=0)
@@ -432,11 +441,9 @@ class DatasetDefiner():
     def _set_dataset_attributes(self):
         if self._name in data_info:
             info = data_info[self._name]
-            self._n_clip_train = info["n_clip_train"]
-            self._n_clip_test = info["n_clip_test"]
+            self._n_clip = {"train": info["n_clip_train"], "test": info["n_clip_test"]}
             self._extension = info["extension"]
-            self._training_path = info["training_path"]
-            self._evaluation_path = info["evaluation_path"]
+            self._path = {"train": info["training_path"], "test": info["evaluation_path"]}
             self._eval_groundtruth_frames = info["eval_groundtruth_frames"]
             self._eval_groundtruth_clips = info["eval_groundtruth_clips"]
         else:
@@ -445,40 +452,47 @@ class DatasetDefiner():
         # specify frame-level groundtruth for some datasets
         if self._name == "Avenue":
             self._eval_groundtruth_frames = \
-                load_groundtruth_Avenue(self._evaluation_path + "/../testing_gt", self._n_clip_test)
+                load_groundtruth_Avenue(self._path["test"] + "/../testing_gt", self._n_clip["test"])
 
         # done
         assert len(self._eval_groundtruth_clips) == len(self._eval_groundtruth_frames)
 
-    def get_info(self, info_name):
-        assert isinstance(info_name, str)
-        if info_name == "n_clip_train":
-            return self._n_clip_train
-        if info_name == "n_clip_test":
-            return self._n_clip_test
-        print("Unknown info_name %s" % info_name)
+    def get_n_clip(self, part):
+        assert part in ("train", "test")
+        return self._n_clip[part]
 
 
 # Modified from https://stackoverflow.com/questions/3160699/python-progress-bar
 class ProgressBar(object):
-    DEFAULT = 'Progress: %(bar)s %(percent)3d%%'
-    FULL = '%(bar)s %(current)d/%(total)d (%(percent)3d%%) %(remaining)d to go'
-
-    def __init__(self, total, width=80, fmt=DEFAULT, symbol='#', output=sys.stderr):
+    def __init__(self, total, width=80, use_ETA=True, symbol='#', output=sys.stderr):
         assert len(symbol) == 1
         self.total = total
         self.width = width
         self.symbol = symbol
         self.output = output
+        #
+        self.use_ETA = use_ETA
+        fmt = "%(bar)s %(current)d/%(total)d (%(percent)3d%%) %(remaining)d to go"
+        if use_ETA:
+            fmt += " -- time: %(elapsed)s/%(eta)s"
         self.fmt = re.sub(r'(?P<name>%\(.+?\))d',
                           r'\g<name>%dd' % len(str(total)), fmt)
         self.current = 0
+        self.start_time = time.time()
+
+    def _format_seconds(self, seconds):
+        rounded = round(seconds)
+        sec = str(rounded % 60).zfill(2)
+        min = rounded // 60
+        hour = str(min//60).zfill(2)
+        min = str(min % 60).zfill(2)
+        return "%s:%s:%s" % (hour, min, sec)
 
     def __call__(self, msg=''):
         percent = self.current / float(self.total)
         size = int(self.width * percent)
         remaining = self.total - self.current
-        bar = '|' + self.symbol * size + ' ' * (self.width - size) + '|'
+        bar = '|' + self.symbol * size + '.' * (self.width - size) + '|'
 
         args = {
             'total': self.total,
@@ -487,6 +501,16 @@ class ProgressBar(object):
             'percent': percent * 100,
             'remaining': remaining
         }
+        # ETA
+        if self.use_ETA:
+            elapsed = time.time() - self.start_time
+            per_item = elapsed / max(self.current, 1e-6)
+            eta = remaining * per_item
+            elapsed_str = self._format_seconds(elapsed)
+            eta_str = self._format_seconds(eta)
+            args['elapsed'] = elapsed_str
+            args['eta'] = eta_str
+
         print('\r' + self.fmt % args + msg, file=self.output, end='')
 
     def done(self):

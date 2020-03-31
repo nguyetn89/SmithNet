@@ -1,6 +1,6 @@
 import numpy as np
 
-loss_weights = {"g_loss": 0.25, "context": 0.5, "reconst": 1, "instant": 1, "longterm": 1}
+loss_weights = {"g_loss": 0.25, "frame": 1., "flow": 2.}
 
 UCSDped2 = {
     "n_clip_train": 16,

@@ -5,12 +5,10 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-# from torch.autograd import Variable
 from torchvision import utils
 from torch.utils.tensorboard import SummaryWriter
 
-from utils import get_img_shape, image_gradient, images_restore, ProgressBar, DatasetDefiner
-from AnomaNet import ExpandedSE, GTNet
+from utils import get_img_shape, image_gradient, images_restore, ProgressBar, DatasetDefiner, extend_flow_channel_in_batch
 from AnomaNet import AnomaNet as Generator
 from CONFIG import loss_weights
 
@@ -18,53 +16,42 @@ LEN_ZFILL = 5
 
 
 class Discriminator(nn.Module):
-    def __init__(self, im_size, device, use_optical_flow=True):
+    def __init__(self, im_size, device):
         super().__init__()
-        self.use_optical_flow = use_optical_flow
         # set device & input shape
         self.device = device
         self.IM_SIZE = get_img_shape(im_size)
 
+        n_filter = 64
+        kernel_size = (4, 4)
+
         # architecture
-        # pair(F[i], F[i+1]) or pair(F[i], F_hat[i+1])
-        in_channel = 5 if self.use_optical_flow else 6
-        n_base_channel = 16 * 4  # no. of channels to start
-        self.network = nn.Sequential(nn.Conv2d(in_channel, n_base_channel, kernel_size=3, stride=1, padding=1),  # end block 0
-                                     nn.Conv2d(n_base_channel, 2*n_base_channel, kernel_size=4, stride=2, padding=1),
-                                     nn.Conv2d(2*n_base_channel, 2*n_base_channel, kernel_size=3, stride=1, padding=1),
-                                     nn.LeakyReLU(negative_slope=0.2, inplace=True),  # end block 1
-                                     nn.Conv2d(2*n_base_channel, 4*n_base_channel, kernel_size=4, stride=2, padding=1),
-                                     ExpandedSE(4*n_base_channel, self.IM_SIZE[0]//4, self.IM_SIZE[1]//4, case="both"),  # expanded SE
-                                     nn.Conv2d(4*n_base_channel, 4*n_base_channel, kernel_size=3, stride=1, padding=1),
-                                     nn.BatchNorm2d(num_features=4*n_base_channel),
-                                     nn.LeakyReLU(negative_slope=0.2, inplace=True),  # end block 2
-                                     nn.Conv2d(4*n_base_channel, 8*n_base_channel, kernel_size=4, stride=2, padding=1),
-                                     ExpandedSE(8*n_base_channel, self.IM_SIZE[0]//8, self.IM_SIZE[1]//8, case="both"),  # expanded SE
-                                     nn.Conv2d(8*n_base_channel, 8*n_base_channel, kernel_size=3, stride=1, padding=1),
-                                     nn.BatchNorm2d(num_features=8*n_base_channel),
-                                     nn.LeakyReLU(negative_slope=0.2, inplace=True),  # end block 3
-                                     nn.Conv2d(8*n_base_channel, 16*n_base_channel, kernel_size=4, stride=2, padding=1),
-                                     ExpandedSE(16*n_base_channel, self.IM_SIZE[0]//16, self.IM_SIZE[1]//16, case="both"),  # expanded SE
-                                     nn.Conv2d(16*n_base_channel, 16*n_base_channel, kernel_size=3, stride=1, padding=1),
-                                     nn.Conv2d(16*n_base_channel, n_base_channel//2, kernel_size=3, stride=1, padding=1))  # end block 4
+        self.disc_block_1 = nn.Sequential(nn.Conv2d(6, n_filter, kernel_size, stride=2),
+                                          nn.LeakyReLU(negative_slope=0.2))
+        self.disc_block_2 = nn.Sequential(nn.Conv2d(n_filter, n_filter*2, kernel_size, stride=2),
+                                          nn.BatchNorm2d(n_filter*2),
+                                          nn.LeakyReLU(negative_slope=0.2))
+        self.disc_block_3 = nn.Sequential(nn.Conv2d(n_filter*2, n_filter*4, kernel_size, stride=2),
+                                          nn.BatchNorm2d(n_filter*4),
+                                          nn.LeakyReLU(negative_slope=0.2))
+        self.disc_block_4 = nn.Sequential(nn.Conv2d(n_filter*4, n_filter*8, kernel_size, stride=2),
+                                          nn.BatchNorm2d(n_filter*8))
+
         self.output = nn.Sigmoid()
         self.to(self.device)
 
-    # X must have shape (B, 6, H, W)
-    # 6 channels: F[i], F_instant[i+1] or F_longterm[i+1]
-    def forward(self, X):
-        logit = self.network(X)
+    # data must have shape (B, 6, H, W)
+    # 6 channels: true frame & true/fake flow
+    def forward(self, data):
+        logit = self.disc_block_4(self.disc_block_3(self.disc_block_2(self.disc_block_1(data))))
         prob = self.output(logit)
         return logit, prob
 
 
 # name: dataset's name
 class DCGAN(object):
-    def __init__(self, name, im_size, store_path, use_optical_flow, use_UNET, use_cross_pred,
-                 device_str=None, use_progress_bar=True):
-        self.use_optical_flow = use_optical_flow
-        self.use_UNET = use_UNET
-        self.use_cross_pred = use_cross_pred
+    def __init__(self, name, im_size, store_path, keep_prob=0.3, device_str=None, use_progress_bar=True):
+        self.keep_prob = keep_prob
         self.use_progress_bar = use_progress_bar
         #
         self.name = name
@@ -82,19 +69,14 @@ class DCGAN(object):
         self._create_all_paths()
         # device
         if device_str is None:
-            self.device = torch.device("cuda:0" if torch.cuda.is_available()
-                                       else "cpu")
+            self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         else:
             assert isinstance(device_str, str)
             self.device = torch.device(device_str)
 
-        print("ContextNet init...")
-        self.ContextNet = GTNet(self.im_size, self.device)
-        self.ContextNet.eval()
-
         print("DCGAN init...")
-        self.G = Generator(self.im_size, self.device, self.use_optical_flow, self.use_UNET, self.use_cross_pred)
-        self.D = Discriminator(self.im_size, self.device, self.use_optical_flow)
+        self.G = Generator(self.im_size, self.device, self.keep_prob)
+        self.D = Discriminator(self.im_size, self.device)
         self.loss = nn.BCEWithLogitsLoss()  # BCEWithLogitsLoss replacing BCELoss
 
         # ADAM optimizers
@@ -157,11 +139,10 @@ class DCGAN(object):
             if not silence:
                 print("G_optimizer saved to %s" % G_optim_filename)
 
-    def train(self, epoch_start, epoch_end, batch_size=16, save_every_x_epochs=5):
+    def train(self, epoch_start, epoch_end, batch_size=16, save_every_x_epochs=None):
         # set mode for networks
         self.G.train()
         self.D.train()
-        self.ContextNet.eval()
         if epoch_start > 0:
             iter_count = self._load_model("G_model_epoch_%s.pkl" % str(epoch_start).zfill(LEN_ZFILL),
                                           "D_model_epoch_%s.pkl" % str(epoch_start).zfill(LEN_ZFILL),
@@ -178,16 +159,20 @@ class DCGAN(object):
         dataset = DatasetDefiner(self.name, self.im_size, self.training_store_path, mode="train")
 
         # variables
-        n_clip = dataset.get_info("n_clip_train")
-        imgs, out_reconstruction, out_instant_pred, out_longterm_pred = None, None, None, None
+        n_clip = dataset.get_n_clip("train")
+        frames, flows, frames_hat, flows_hat = None, None, None, None
 
         # progress bar
         progress = None
         if self.use_progress_bar:
-            progress = ProgressBar(n_clip * (epoch_end - epoch_start), fmt=ProgressBar.FULL)
+            progress = ProgressBar(n_clip * (epoch_end - epoch_start), use_ETA=True)
         print("Started time:", datetime.datetime.now())
 
+        # define loss functions, may be different for partial losses
+        L2_loss, L1_loss = nn.MSELoss(), nn.L1Loss()
+
         # loop over epoch
+        msg = ""
         for epoch in range(epoch_start, epoch_end):
             np.random.seed(epoch)   # to make sure getting similar results when training from pretrained models
             torch.manual_seed(epoch)
@@ -197,105 +182,62 @@ class DCGAN(object):
             for clip_idx in clip_order:
                 dataset.load_data(clip_idx)
                 # >>>>>>>> TODO: check whether it is better if shuffle is True <<<<<<<<<
-                dataloader = torch.utils.data.DataLoader(dataset.training_data, batch_size, shuffle=False)
-                #
-                d_loss_real, d_loss_fake = 0, 0
-                g_loss, d_loss = 0, 0
-                g_loss_total = 0
-                instant_loss, longterm_loss, reconst_loss = 0, 0, 0
+                dataloader = torch.utils.data.DataLoader(dataset.data["train"], batch_size, shuffle=False)
 
                 # process batch
-                msg = ""
                 for data_batch in dataloader:
                     # skip last batch with very few samples
-                    if len(data_batch) < 3:
+                    if len(data_batch) < 2:
                         continue
                     # normalize data to range [0, 1] and then [-1, 1]
-                    imgs = data_batch[:, :3, :, :].to(self.device) / 255.
-                    imgs *= 2.
-                    imgs -= 1.
+                    frames = data_batch[:, :3, :, :].to(self.device) / 255.
+                    frames *= 2.
+                    frames -= 1.
                     #
-                    if self.use_optical_flow:
-                        flows = data_batch[:, 3:, :, :].to(self.device)
-                        assert len(imgs) == len(flows)
-                        if torch.sum(torch.abs(flows[-1])) == 0.0:
-                            imgs, flows = imgs[:-1], flows[:-1]
+                    flows = extend_flow_channel_in_batch(data_batch[:, 3:, :, :]).to(self.device)
+                    assert len(frames) == len(flows)
+                    if torch.sum(torch.abs(flows[-1])) == 0.0:
+                        frames, flows = frames[:-1], flows[:-1]
 
                     # ============================== Discriminator optimizing ==============================
-
+                    self.D.zero_grad()
                     # discriminator loss with real data
-                    if not self.use_optical_flow:
-                        real_D_input = torch.cat([imgs[:-1], imgs[1:]], dim=1)
-                    else:
-                        real_D_input = torch.cat([imgs, flows], dim=1)
+                    real_D_input = torch.cat([frames, flows], dim=1)
                     real_D_output_logit, _ = self.D(real_D_input)
-                    d_loss_real = self.loss(real_D_output_logit, torch.ones_like(real_D_output_logit).to(self.device))
+                    d_loss_real = self.loss(real_D_output_logit,
+                                            torch.ones_like(real_D_output_logit).to(self.device))
 
                     # get fake outputs from Generator
-                    in_context, out_reconstruction, out_instant_pred, out_longterm_pred = self.G(imgs)
+                    frames_hat, flows_hat = self.G(frames)
 
                     # discriminator loss with fake data
-                    last_idx = len(imgs) if self.use_optical_flow else -1   # remove last frame if using frame prediction
-                    fake_D_input_instant = torch.cat([imgs[:last_idx], out_instant_pred[:last_idx]], dim=1)
-                    fake_D_input_longterm = torch.cat([imgs[:last_idx], out_longterm_pred[:last_idx]], dim=1)
-
-                    fake_D_output_logit_instant, _ = self.D(fake_D_input_instant)
-                    fake_D_output_logit_longterm, _ = self.D(fake_D_input_longterm)
-                    d_loss_fake_instant = self.loss(fake_D_output_logit_instant,
-                                                    torch.zeros_like(fake_D_output_logit_instant).to(self.device))
-                    d_loss_fake_longterm = self.loss(fake_D_output_logit_longterm,
-                                                     torch.zeros_like(fake_D_output_logit_longterm).to(self.device))
-                    d_loss_fake = 0.5 * (d_loss_fake_instant + d_loss_fake_longterm)
+                    fake_D_input = torch.cat([frames, flows_hat], dim=1)
+                    fake_D_output_logit, _ = self.D(fake_D_input)
+                    d_loss_fake = self.loss(fake_D_output_logit,
+                                            torch.zeros_like(fake_D_output_logit).to(self.device))
 
                     # optimize discriminator
                     d_loss = 0.5*d_loss_fake + 0.5*d_loss_real
-                    self.D.zero_grad()
                     d_loss.backward(retain_graph=True)
                     self.d_optimizer.step()
 
                     # ============================== Generator optimizing ==============================
 
-                    fake_D_output_logit_instant, _ = self.D(fake_D_input_instant)
-                    fake_D_output_logit_longterm, _ = self.D(fake_D_input_longterm)
-                    g_loss_instant = self.loss(fake_D_output_logit_instant,
-                                               torch.ones_like(fake_D_output_logit_instant).to(self.device))
-                    g_loss_longterm = self.loss(fake_D_output_logit_longterm,
-                                                torch.ones_like(fake_D_output_logit_longterm).to(self.device))
+                    fake_D_output_logit, _ = self.D(fake_D_input)
+                    g_loss = self.loss(fake_D_output_logit,
+                                       torch.ones_like(fake_D_output_logit).to(self.device))
 
-                    g_loss = g_loss_instant + g_loss_longterm
+                    # frame loss
+                    dx_frame_in, dy_frame_in = image_gradient(frames, out_abs=True)
+                    dx_frame_out, dy_frame_out = image_gradient(frames_hat, out_abs=True)
+                    frame_loss = L2_loss(frames, frames_hat) + \
+                        torch.mean(torch.abs(dx_frame_in - dx_frame_out) + torch.abs(dy_frame_in - dy_frame_out))
 
-                    # groundtruth context
-                    gt_context = self.ContextNet((imgs + 1.) * 0.5)  # recover original inputs because of the pretrained model
-
-                    # define loss functions, may be different for partial losses
-                    L2_loss, L1_loss = nn.MSELoss(), nn.L1Loss()
-
-                    # context loss
-                    context_loss = L2_loss(in_context, gt_context)
-
-                    # prediction losses
-                    if not self.use_optical_flow:
-                        dx_instant_pred, dy_instant_pred = image_gradient(out_instant_pred[:-1], out_abs=True)
-                        dx_longterm_pred, dy_longterm_pred = image_gradient(out_longterm_pred[:-1], out_abs=True)
-                        dx_input, dy_input = image_gradient(imgs[1:], out_abs=True)
-                        instant_loss = L2_loss(out_instant_pred[:-1], imgs[1:]) + \
-                            L1_loss(dx_instant_pred, dx_input) + L1_loss(dy_instant_pred, dy_input)
-                        longterm_loss = L2_loss(out_longterm_pred[:-1], imgs[1:]) + \
-                            L1_loss(dx_longterm_pred, dx_input) + L1_loss(dy_longterm_pred, dy_input)
-                    else:
-                        instant_loss = L1_loss(out_instant_pred, flows)
-                        longterm_loss = L1_loss(out_longterm_pred, flows)
-
-                    # reconstruction loss
-                    last_idx = len(imgs) if self.use_optical_flow else -1
-                    dx_recons_pred, dy_recons_pred = image_gradient(out_reconstruction[:last_idx], out_abs=True)
-                    dx_input, dy_input = image_gradient(imgs[:last_idx], out_abs=True)
-                    reconst_loss = L2_loss(out_reconstruction[:last_idx], imgs[:last_idx]) + \
-                        L1_loss(dx_recons_pred, dx_input) + L1_loss(dy_recons_pred, dy_input)
+                    # flow loss
+                    flow_loss = L1_loss(flows, flows_hat)
 
                     # total loss
-                    g_loss_total = loss_weights["g_loss"]*g_loss + loss_weights["context"]*context_loss + \
-                        loss_weights["reconst"]*reconst_loss + loss_weights["instant"]*instant_loss + loss_weights["longterm"]*longterm_loss
+                    g_loss_total = loss_weights["g_loss"]*g_loss + loss_weights["frame"]*frame_loss + loss_weights["flow"]*flow_loss
 
                     self.G.zero_grad()
                     g_loss_total.backward()
@@ -309,10 +251,8 @@ class DCGAN(object):
                        'Loss D': d_loss.data.item(),
                        'Loss G total': g_loss_total.data.item(),
                        'Loss G': g_loss.data.item(),
-                       'Loss context': context_loss.data.item(),
-                       'Loss instant': instant_loss.data.item(),
-                       'Loss longterm': longterm_loss.data.item(),
-                       'Loss reconst': reconst_loss.data.item(),
+                       'Loss frame': frame_loss.data.item(),
+                       'Loss flow': flow_loss.data.item(),
                     }
                     for tag, value in info.items():
                         self.logger.add_scalar(tag, value, iter_count)
@@ -320,9 +260,9 @@ class DCGAN(object):
                     iter_count += 1
 
                     # emit losses for visualization
-                    msg = " [(ctx: %.2f, rec: %.2f, ins: %.2f, ltm: %.2f), G_total: %.2f, G: %.2f, D: %.2f]" \
-                          % (context_loss.data.item(), reconst_loss.data.item(), instant_loss.data.item(), longterm_loss.data.item(),
-                             g_loss_total.data.item(), g_loss.data.item(), d_loss.data.item())
+                    msg = " [(frame: %.2f, flow: %.2f, G_loss: %.2f), G_total: %.2f, D: %.2f]" \
+                          % (frame_loss.data.item(), flow_loss.data.item(), g_loss.data.item(),
+                             g_loss_total.data.item(), d_loss.data.item())
 
                 if progress is not None:
                     progress.current += 1
@@ -331,7 +271,7 @@ class DCGAN(object):
             self.logger.flush()
 
             # Saving model and sampling images every X epochs
-            if (epoch + 1) % save_every_x_epochs == 0:
+            if save_every_x_epochs is not None and (epoch + 1) % save_every_x_epochs == 0:
                 self._save_model("G_model_epoch_%s.pkl" % str(epoch + 1).zfill(LEN_ZFILL),
                                  "D_model_epoch_%s.pkl" % str(epoch + 1).zfill(LEN_ZFILL),
                                  "G_optim_epoch_%s.pkl" % str(epoch + 1).zfill(LEN_ZFILL),
@@ -339,99 +279,83 @@ class DCGAN(object):
                                  iter_count=iter_count)
 
                 # Denormalize images and save them in grid
-                images_to_save = [images_restore(imgs.data[0].cpu()),
-                                  images_restore(out_reconstruction.data[0].cpu()),
-                                  images_restore(imgs.data[1].cpu()),
-                                  images_restore(out_instant_pred.data[0].cpu(), is_optical_flow=self.use_optical_flow),
-                                  images_restore(out_longterm_pred.data[0].cpu(), is_optical_flow=self.use_optical_flow)]
+                images_to_save = [images_restore(frames.data[0].cpu()),
+                                  images_restore(frames_hat.data[0].cpu()),
+                                  images_restore(flows.data[0].cpu(), is_optical_flow=True),
+                                  images_restore(flows_hat.data[0].cpu(), is_optical_flow=True)]
                 grid = utils.make_grid(images_to_save, nrow=1)
                 utils.save_image(grid, "%s/gen_epoch_%s.png" % (self.gen_image_store_path, str(epoch + 1).zfill(LEN_ZFILL)))
 
         # finish iteration
         if progress is not None:
             progress.done()
+        print(msg)
         print("Finished time:", datetime.datetime.now())
 
         # Save the trained parameters
-        if (epoch + 1) % save_every_x_epochs != 0:  # not already saved inside loop
-            self._save_model("G_model_epoch_%s.pkl" % str(epoch + 1).zfill(LEN_ZFILL),
-                             "D_model_epoch_%s.pkl" % str(epoch + 1).zfill(LEN_ZFILL),
-                             "G_optim_epoch_%s.pkl" % str(epoch + 1).zfill(LEN_ZFILL),
-                             "D_optim_epoch_%s.pkl" % str(epoch + 1).zfill(LEN_ZFILL),
+        if save_every_x_epochs is None or epoch_end % save_every_x_epochs != 0:  # not already saved inside loop
+            self._save_model("G_model_epoch_%s.pkl" % str(epoch_end).zfill(LEN_ZFILL),
+                             "D_model_epoch_%s.pkl" % str(epoch_end).zfill(LEN_ZFILL),
+                             "G_optim_epoch_%s.pkl" % str(epoch_end).zfill(LEN_ZFILL),
+                             "D_optim_epoch_%s.pkl" % str(epoch_end).zfill(LEN_ZFILL),
                              iter_count=iter_count)
 
     # calculate output from pretrained model and store them to files
     # may feed training data to get losses as weights in evaluation
-    def infer(self, epoch, batch_size=16, data_set="test_set"):
-        assert data_set in ("test_set", "training_set")
+    def infer(self, epoch, batch_size=16, part="test"):
+        assert part in ("train", "test")
         # load pretrained model and set to eval() mode
         self._load_model("G_model_epoch_%s.pkl" % str(epoch).zfill(LEN_ZFILL))
         self.G.eval()
 
         # dataloader for yielding batches
-        if data_set == "test_set":
-            dataset = DatasetDefiner(self.name, self.im_size, self.evaluation_store_path, mode="eval")
-            n_clip = dataset.get_info("n_clip_test")
-        else:
-            dataset = DatasetDefiner(self.name, self.im_size, self.training_store_path, mode="train")
-            n_clip = dataset.get_info("n_clip_train")
-
-        # init variables for batch evaluation
-        # results_reconst, results_instant, results_longterm = [], [], []
+        dataset = DatasetDefiner(self.name, self.im_size,
+                                 self.evaluation_store_path if part == "test" else self.training_store_path,
+                                 mode=part)
+        n_clip = dataset.get_n_clip(part)
 
         # progress bar
         progress = None
         if self.use_progress_bar:
-            progress = ProgressBar(n_clip, fmt=ProgressBar.FULL)
+            progress = ProgressBar(n_clip, use_ETA=True)
         print("Started time:", datetime.datetime.now())
 
         with torch.no_grad():
+            frames, flows, frames_hat, flows_hat = None, None, None, None
             # process each clip
             for clip_idx in range(n_clip):
                 dataset.load_data(clip_idx)
-                if data_set == "test_set":
-                    dataloader = torch.utils.data.DataLoader(dataset.evaluation_data, batch_size, shuffle=False)
-                else:
-                    dataloader = torch.utils.data.DataLoader(dataset.training_data, batch_size, shuffle=False)
+                dataloader = torch.utils.data.DataLoader(dataset.data[part], batch_size, shuffle=False)
 
-                output_reconst, output_instant, output_longterm = [], [], []
+                output_frames, output_flows = [], []
 
                 # evaluate a batch
-                imgs = None
                 for data_batch in dataloader:
-                    imgs = data_batch[:, :3, :, :].to(self.device) / 255.  # eval ALL video frames
-                    imgs *= 2.
-                    imgs -= 1.
-                    _, batch_reconst, batch_instant_pred, batch_longterm_pred = self.G(imgs)
+                    frames = data_batch[:, :3, :, :].to(self.device) / 255.  # eval ALL video frames
+                    frames *= 2.
+                    frames -= 1.
+                    flows = extend_flow_channel_in_batch(data_batch[:, 3:, :, :])
+                    frames_hat, flows_hat = self.G(frames)
 
                     # store results
-                    output_reconst.append(batch_reconst.cpu().numpy())
-                    output_instant.append(batch_instant_pred.cpu().numpy())
-                    output_longterm.append(batch_longterm_pred.cpu().numpy())
+                    output_frames.append(frames_hat.cpu().numpy())
+                    output_flows.append(flows_hat.cpu().numpy())
 
                 # store data to file
-                data = {"reconst": np.concatenate(output_reconst, axis=0),
-                        "instant": np.concatenate(output_instant, axis=0),
-                        "longterm": np.concatenate(output_longterm, axis=0)}
-                out_path = self.output_store_path + '/out_epoch_%s/%s' % (str(epoch).zfill(LEN_ZFILL), data_set[:-4])
+                data = {"frames_hat": np.concatenate(output_frames, axis=0),
+                        "flows_hat": np.concatenate(output_flows, axis=0)}
+                out_path = self.output_store_path + '/out_epoch_%s/%s' % (str(epoch).zfill(LEN_ZFILL), part)
                 self._create_path(out_path)
-                out_file = os.path.join(out_path, '%s.npy' % str(clip_idx + 1).zfill(len(str(n_clip))))
+                out_file = os.path.join(out_path, 'clip_%s.npy' % str(clip_idx + 1).zfill(len(str(n_clip))))
                 np.save(out_file, data)
                 if not self.use_progress_bar:
                     print("Data saved to %s" % out_file)
 
                 # save example image
-                if len(imgs) > 1:
-                    images_to_save = [images_restore(imgs.data[-2].cpu().numpy()),
-                                      images_restore(data["reconst"][-2]),
-                                      images_restore(imgs.data[-1].cpu().numpy()),
-                                      images_restore(data["instant"][-2], is_optical_flow=self.use_optical_flow),
-                                      images_restore(data["longterm"][-2], is_optical_flow=self.use_optical_flow)]
-                else:
-                    images_to_save = [images_restore(imgs.data[0].cpu().numpy()),
-                                      images_restore(data["reconst"][0]),
-                                      images_restore(data["instant"][0], is_optical_flow=self.use_optical_flow),
-                                      images_restore(data["longterm"][0], is_optical_flow=self.use_optical_flow)]
+                images_to_save = [images_restore(frames.data[0].cpu().numpy()),
+                                  images_restore(frames_hat.data[0].cpu().numpy()),
+                                  images_restore(flows.data[0].cpu().numpy(), is_optical_flow=True),
+                                  images_restore(flows_hat.data[0].cpu().numpy(), is_optical_flow=True)]
                 grid = utils.make_grid([torch.tensor(image) for image in images_to_save], nrow=1)
                 out_file = os.path.join(out_path, '%s.png' % str(clip_idx + 1).zfill(len(str(n_clip))))
                 utils.save_image(grid, out_file)
@@ -444,65 +368,104 @@ class DCGAN(object):
             progress.done()
         print("Finished time:", datetime.datetime.now())
 
-    # function for computing anomaly score
-    # input tensor shape: (n, C, H, W)
+    # function for computing anomaly score from [frames, frames_hat, flows, flows_hat]
+    # each input tensor shape: (n, C, H, W)
     # power: used for combining channels (1=abs, 2=square)
-    def _calc_score(self, tensor, power, patch_size, stride):
-        if not isinstance(tensor, torch.Tensor):
-            tensor = torch.tensor(tensor)
-        assert power in (1, 2) and patch_size % 2
-        # combine channels
-        tensor2 = torch.sum(torch.abs(tensor) if power == 1 else tensor**2, dim=1)
-        tensor2.unsqueeze_(1)
-        # convolution for most salient patch
-        weight = torch.ones(1, 1, patch_size, patch_size)
-        padding = patch_size // 2
-        heatmaps = F.conv2d(tensor2, weight, stride=stride, padding=padding).numpy()
-        # get sum value and position of the patch
-        scores = [np.max(heatmap) for heatmap in heatmaps]
-        positions = [np.where(heatmap == np.max(heatmap)) for heatmap in heatmaps]
-        positions = [(position[0][0], position[1][0]) for position in positions]
-        # return scores and positions
-        return {"score": scores, "position": positions}
+    def _calc_score(self, data, patch_size, stride, power=2):
+        assert power in (1, 2)
 
-    # evaluation from frame-level groundtruth and (real eval data, output eval data)
-    def evaluate(self, epoch, power=1, patch_size=5, stride=1):
-        dataset = DatasetDefiner(self.name, self.im_size, self.evaluation_store_path, mode="eval")
-        n_clip = dataset.get_info("n_clip_test")
-        reconst_scores, instant_scores, longterm_scores = [], [], []
+        # extract data
+        frames, frames_hat, flows, flows_hat = data
+        if not isinstance(frames, torch.Tensor):
+            frames = torch.tensor(frames)
+        if not isinstance(frames_hat, torch.Tensor):
+            frames_hat = torch.tensor(frames_hat)
+        if not isinstance(flows, torch.Tensor):
+            flows = torch.tensor(flows)
+        if not isinstance(flows_hat, torch.Tensor):
+            flows_hat = torch.tensor(flows_hat)
+
+        flows = extend_flow_channel_in_batch(flows)
+
+        # find max patch of optical flow
+        kernel = torch.ones(1, 1, patch_size, patch_size)
+        padding = patch_size // 2
+        flows_diff = torch.sum(torch.abs(flows - flows_hat) if power == 1 else (flows - flows_hat)**2, dim=1, keepdim=True)
+        flows_heatmaps = F.conv2d(flows_diff, kernel, stride=stride, padding=padding).numpy()
+        flows_scores = np.array([np.max(heatmap) for heatmap in flows_heatmaps])
+
+        # frame-scores according to max patches
+        frames_diff = torch.sum(torch.abs(frames - frames_hat) if power == 1 else (frames - frames_hat)**2, dim=1, keepdim=True)
+        frames_heatmaps = F.conv2d(frames_diff, kernel, stride=stride, padding=padding).numpy()
+        frames_scores = np.array([np.max(frame_heatmap[flow_heatmap == np.max(flow_heatmap)])
+                                  for (frame_heatmap, flow_heatmap) in zip(frames_heatmaps, flows_heatmaps)])
+
+        return frames_scores, flows_scores
+
+    # frame-level calculation for training/test sets
+    def calc_raw_scores(self, epoch, part, patch_size, stride, power, force_calc=False):
+        assert part in ("train", "test")
+        out_path = self.output_store_path + '/out_epoch_%s/%s' % (str(epoch).zfill(LEN_ZFILL), part)
+        self._create_path(out_path)
+        out_file = os.path.join(out_path, 'scores.npy')
+        # check whether file existed
+        if os.path.exists(out_file):
+            scores = np.load(out_file, allow_pickle=True).item()
+        else:
+            scores = {}
+        # check whether results already calculated
+        key = "%d_%d_%d" % (patch_size, stride, power)
+        if key in scores and not force_calc:
+            return scores[key]
+        # calculate new results
+        dataset = DatasetDefiner(self.name, self.im_size, self.evaluation_store_path, mode=part)
+        n_clip = dataset.get_n_clip(part)
+        frames_scores, flows_scores = [], []
 
         for clip_idx in range(n_clip):
             dataset.load_data(clip_idx)
 
             # get input data
-            imgs = dataset.evaluation_data[:][:, :3, :, :]
-            if self.use_optical_flow:
-                flows = dataset.evaluation_data[:][:, 3:, :, :]
+            frames = dataset.data[part][:][:, :3, :, :] / 127.5 - 1.
+            flows = extend_flow_channel_in_batch(dataset.data[part][:][:, 3:, :, :])
 
             # get output results
-            output_path = self.output_store_path + '/out_epoch_%s/test' % str(epoch).zfill(LEN_ZFILL)
-            output_file = os.path.join(output_path, '%s.npy' % str(clip_idx + 1).zfill(len(str(n_clip))))
+            output_file = os.path.join(out_path, 'clip_%s.npy' % str(clip_idx + 1).zfill(len(str(n_clip))))
             output_data = np.load(output_file, allow_pickle=True).item()
 
-            # calc difference tensor and patch scores
-            reconst_scores.append(self._calc_score(output_data["reconst"][:-1] - imgs[:-1],
-                                                   power, patch_size, stride)["score"])
-            if not self.use_optical_flow:
-                instant_scores.append(self._calc_score(output_data["instant"][:-1] - imgs[1:],
-                                                       power, patch_size, stride)["score"])
-                longterm_scores.append(self._calc_score(output_data["longterm"][:-1] - imgs[1:],
-                                                        power, patch_size, stride)["score"])
-            else:
-                instant_scores.append(self._calc_score(output_data["instant"][:-1] - flows[:-1],
-                                                       power, patch_size, stride)["score"])
-                longterm_scores.append(self._calc_score(output_data["longterm"][:-1] - flows[:-1],
-                                                        power, patch_size, stride)["score"])
+            data = [frames, output_data["frames_hat"], flows, output_data["flows_hat"]]
+            tmp_frames_scores, tmp_flows_scores = self._calc_score(data, patch_size, stride, power)
+            frames_scores.append(tmp_frames_scores)
+            flows_scores.append(tmp_flows_scores)
+
+        scores[key] = {"frame": frames_scores, "flow": flows_scores}
+        np.save(out_file, scores)
+        return scores[key]
+
+    # evaluation from frame-level groundtruth and (real eval data, output eval data)
+    def evaluate(self, epoch, patch_size, stride, power, use_weight=True):
+        # load weights for summation of frame and flow scores
+        if use_weight:
+            training_scores = self.calc_raw_scores(epoch, "train", patch_size, stride, power)
+            weights = (1./np.mean(np.concatenate(training_scores["frame"])),
+                       1./np.mean(np.concatenate(training_scores["flow"])))
+            print("Loaded weights:", weights)
+        else:
+            weights = (1., 1.)
+        const_lambda = 0.2   # lambda in ICCV paper
+
+        # load scores of test set
+        test_scores = self.calc_raw_scores(epoch, "test", patch_size, stride, power)
+        frames_scores, flows_scores = test_scores["frame"], test_scores["flow"]
+        sum_scores = [const_lambda*np.log(weights[0]*frame_scores) + np.log(weights[1]*flow_scores)
+                      for (frame_scores, flow_scores) in zip(frames_scores, flows_scores)]
 
         # return auc(s)
-        auc_reconst_norm = dataset.evaluate(reconst_scores, normalize_each_clip=True)
-        auc_reconst = dataset.evaluate(reconst_scores, normalize_each_clip=False)
-        auc_instant_norm = dataset.evaluate(instant_scores, normalize_each_clip=True)
-        auc_instant = dataset.evaluate(instant_scores, normalize_each_clip=False)
-        auc_longterm_norm = dataset.evaluate(longterm_scores, normalize_each_clip=True)
-        auc_longterm = dataset.evaluate(longterm_scores, normalize_each_clip=False)
-        return auc_reconst_norm, auc_reconst, auc_instant_norm, auc_instant, auc_longterm_norm, auc_longterm
+        dataset = DatasetDefiner(self.name, self.im_size, self.evaluation_store_path, mode="test")
+        auc_frames_norm = dataset.evaluate(frames_scores, normalize_each_clip=True)
+        auc_frames = dataset.evaluate(frames_scores, normalize_each_clip=False)
+        auc_flows_norm = dataset.evaluate(flows_scores, normalize_each_clip=True)
+        auc_flows = dataset.evaluate(flows_scores, normalize_each_clip=False)
+        auc_sum_norm = dataset.evaluate(sum_scores, normalize_each_clip=True)
+        auc_sum = dataset.evaluate(sum_scores, normalize_each_clip=False)
+        return auc_frames_norm, auc_frames, auc_flows_norm, auc_flows, auc_sum_norm, auc_sum

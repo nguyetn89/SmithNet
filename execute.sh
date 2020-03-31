@@ -1,16 +1,16 @@
 task=$1
-dataset="Avenue"
-workspace="./workspace_flow_unetInstant_cross"
-unet="instant"
+dataset="UCSDped2"
+workspace="./workspace_ICCV_extend"
 if [ $task == "train" ]
 then
-    python ./main.py --dataset $dataset --height 128 --width 192 --task train --epoch 20 --batch 4 --workspace $workspace --unet $unet --cross_pred 1
+    python ./main.py --dataset $dataset --height 128 --width 192 --task train --epoch 20 --batch 4 --workspace $workspace
 else
-    for epoch in $(seq 5 5 25)
+    for epoch in $(seq 5 5 20)
     do
-        python ./main.py --dataset $dataset --height 128 --width 192 --task infer --epoch $epoch --batch 4 --workspace $workspace --unet $unet --cross_pred 1
+        python ./main.py --dataset $dataset --height 128 --width 192 --task infer --subset test --epoch $epoch --batch 4 --workspace $workspace
+        python ./main.py --dataset $dataset --height 128 --width 192 --task infer --subset train --epoch $epoch --batch 4 --workspace $workspace
     done
-    for epoch in $(seq 5 5 25)
+    for epoch in $(seq 5 5 20)
     do
         for power in $(seq 1 2)
         do
@@ -19,7 +19,7 @@ else
                 for stride in $(seq 1 7)
                 do
                     echo "epoch ${epoch}: power ${power}, patch ${patch}, stride ${stride}"
-                    python ./main.py --dataset $dataset --height 128 --width 192 --task eval --epoch ${epoch} --batch 4 --workspace $workspace --unet $unet --cross_pred 1 --print 0
+                    python ./main.py --dataset $dataset --height 128 --width 192 --task eval --epoch ${epoch} --workspace $workspace --patch ${patch} --stride ${stride} --power ${power} --print 0
                 done
             done
         done
