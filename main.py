@@ -19,7 +19,9 @@ def print_params(params):
     print("dataset: %s | task: %s | epoch: %s" % (params["dataset"], params["task"], params["epoch"]))
     print("method: %s | workspace: %s" % (params["method"], params["workspace"]))
     print("height: %d | width: %d | batch: %d" % (params["height"], params["width"], params["batch"]))
-    # print("optical: %d | unet: %s | cross: %d" % (params["optical"], params["unet"], params["cross_pred"]))
+    print("use RNN: %d (cat latent: %d) | use element norm: %d (gamma %.1f, sigmoid %d)| use channel norm: %d" %
+          (params["RNN"], params["cat_latent"], params["elenorm"], params["training_gamma"], params["sigmoid_instead_tanh"], params["chanorm"]))
+    print("skip extension for blocks: %s" % params["skip_blocks"])
     if params["task"] == "eval":
         print("power: %d | patch: %d | stride: %d" % (params["power"], params["patch"], params["stride"]))
 
@@ -40,10 +42,21 @@ def run(params):
     method = params["method"]
     im_size = (params["height"], params["width"])
     store_path = params["workspace"]
-    # use_optical_flow = params["optical"] != 0
-    # use_UNET = params["unet"]
-    # use_cross_pred = params["cross_pred"] != 0
+    training_gamma = params["training_gamma"]
     use_progress_bar = params["progressbar"] != 0
+    print_summary = params["prt_summary"] != 0
+    # extension parameters
+    extension_params = ["skip:%s" % params["skip_blocks"]]
+    if params["RNN"] != 0:
+        extension_params.append("RNN")
+    if params["cat_latent"] != 0:
+        extension_params.append("cat_latent")
+    if params["elenorm"] != 0:
+        extension_params.append("element_norm")
+    if params["sigmoid_instead_tanh"] != 0:
+        extension_params.append("sigmoid_instead_tanh")
+    if params["chanorm"] != 0:
+        extension_params.append("channel_norm")
     # init model controller
     if method == "WGAN":
         # controller = WGAN_GP(dataset, im_size, store_path)
@@ -55,10 +68,10 @@ def run(params):
         return
     else:
         controller = DCGAN(dataset, im_size, store_path,
-                           # use_optical_flow,
-                           # use_UNET,
-                           # use_cross_pred,
-                           use_progress_bar=use_progress_bar)
+                           extension_params,
+                           training_gamma=training_gamma,
+                           use_progress_bar=use_progress_bar,
+                           prt_summary=print_summary)
     #
     if task == "train":
         print("========== Mode: Training ==========")
@@ -80,9 +93,10 @@ def run(params):
         patch_size = params["patch"]
         stride = params["stride"]
         print("Epoch %d" % epoch_eval)
-        AUCs = controller.evaluate(epoch_eval, patch_size, stride, power)
+        AUCs, aPRs = controller.evaluate(epoch_eval, patch_size, stride, power)
         print("Epoch", epoch_eval)
         print("AUCs:", AUCs)
+        print("aPRs:", aPRs)
     else:
         print("Unknown task", task)
 
@@ -92,10 +106,17 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, default=None)
     parser.add_argument("--height", type=int, default=128)
     parser.add_argument("--width", type=int, default=192)
+    parser.add_argument("--RNN", type=int, default=1)
+    parser.add_argument("--cat_latent", type=int, default=1)
+    parser.add_argument("--elenorm", type=int, default=1)
+    parser.add_argument("--sigmoid_instead_tanh", type=int, default=0)
+    parser.add_argument("--training_gamma", type=float, default=-1)
+    parser.add_argument("--chanorm", type=int, default=1)
+    parser.add_argument("--skip_blocks", type=str, default="none")
     parser.add_argument("--task", type=str, default=None)
     parser.add_argument("--subset", type=str, default="test")
     parser.add_argument("--epoch", type=str, default=None)
-    parser.add_argument("--batch", type=int, default=4)
+    parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--every", type=int, default=5)
     parser.add_argument("--progressbar", type=int, default=0)
     parser.add_argument("--method", type=str, default="DCGAN")
@@ -104,6 +125,7 @@ if __name__ == "__main__":
     parser.add_argument("--patch", type=int, default=5)
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--print", type=int, default=1)
+    parser.add_argument("--prt_summary", type=int, default=0)
     args = vars(parser.parse_args())
     # validate arguments
     assert args["dataset"] in data_info

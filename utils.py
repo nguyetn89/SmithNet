@@ -10,7 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.metrics import roc_auc_score, roc_curve
+from sklearn.metrics import roc_auc_score, roc_curve, average_precision_score
 from scipy.io import loadmat
 from collections import OrderedDict
 
@@ -226,7 +226,7 @@ def summary(model, input_size, batch_size=-1, device="cuda", print_details=False
         input_size = [input_size]
 
     # batch_size of 2 for batchnorm
-    x = [torch.rand(2, *in_size).type(dtype) for in_size in input_size]
+    x = [torch.ones(2, *in_size).type(dtype) for in_size in input_size]
     # print(type(x[0]))
 
     # create properties
@@ -391,7 +391,7 @@ class DatasetDefiner():
 
         assert name in ("UCSDped1", "UCSDped2",
                         "Avenue", "Entrance", "Exit",
-                        "Shanghai", "Crime",
+                        "ShanghaiTech", "Crime",
                         "Belleview", "Train",
                         "just4test")
         # set basic attributes
@@ -417,25 +417,33 @@ class DatasetDefiner():
     def evaluate(self, clip_results_raw, normalize_each_clip):
         assert len(clip_results_raw) == self._n_clip["test"]
         clip_results = copy.deepcopy(clip_results_raw)
-        groundtruths = [np.zeros_like(clip_result) for clip_result in clip_results]
-        # set frame-level groundtruth scores
-        for clip_idx in range(len(self._eval_groundtruth_clips)):
-            anomaly_intervals = self._eval_groundtruth_frames[clip_idx]
-            for i in range(len(anomaly_intervals)//2):
-                # -1 because _eval_groundtruth_frames given in 1-based index
-                start = anomaly_intervals[2*i] - 1
-                end = anomaly_intervals[2*i+1] - 1
-                groundtruths[clip_idx][start:end] = 1
-            if normalize_each_clip:
-                clip_results[clip_idx] = \
-                    (clip_results[clip_idx] - 0*min(clip_results[clip_idx]))/(max(clip_results[clip_idx]) - 0*min(clip_results[clip_idx]))
+        if self._name in ("ShanghaiTech", "Belleview", "Train"):
+            groundtruths = self._eval_groundtruth_frames
+            assert len(clip_results) == len(groundtruths)
+            assert all([len(clip_result) == len(groundtruth) for (clip_result, groundtruth) in zip(clip_results, groundtruths)])
+        else:
+            groundtruths = [np.zeros_like(clip_result) for clip_result in clip_results]
+            # set frame-level groundtruth scores
+            for clip_idx in range(len(self._eval_groundtruth_clips)):
+                anomaly_intervals = self._eval_groundtruth_frames[clip_idx]
+                for i in range(len(anomaly_intervals)//2):
+                    # -1 because _eval_groundtruth_frames given in 1-based index
+                    start = anomaly_intervals[2*i] - 1
+                    end = anomaly_intervals[2*i+1] - 1
+                    groundtruths[clip_idx][start:end] = 1
+                if normalize_each_clip:
+                    clip_results[clip_idx] = \
+                        (clip_results[clip_idx] - 0*min(clip_results[clip_idx]))/(max(clip_results[clip_idx]) - 0*min(clip_results[clip_idx]))
         # flatten groundtruth and predicted scores for evaluation
         true_results = np.concatenate(groundtruths, axis=0)
         pred_results = np.concatenate(clip_results, axis=0)
+        assert len(true_results) == len(pred_results)
+        print("Ground truth: %d abnormal frames, %d normal frames" %
+              (int(np.sum(true_results)), len(true_results) - int(np.sum(true_results))))
 
         # plot roc ROC curve
         # plot_ROC(true_results, pred_results)
-        return roc_auc_score(true_results, pred_results)
+        return roc_auc_score(true_results, pred_results), average_precision_score(true_results, pred_results)
 
     # set attributes related to each dataset
     def _set_dataset_attributes(self):
@@ -453,6 +461,12 @@ class DatasetDefiner():
         if self._name == "Avenue":
             self._eval_groundtruth_frames = \
                 load_groundtruth_Avenue(self._path["test"] + "/../testing_gt", self._n_clip["test"])
+        elif self._name == "ShanghaiTech":
+            self._eval_groundtruth_frames = \
+                load_groundtruth_ShanghaiTech(self._path["test"] + "/../test_frame_mask", self._n_clip["test"])
+        elif self._name in ("Belleview", "Train"):
+            self._eval_groundtruth_frames = \
+                load_groundtruth_Traffic_Train_and_Belleview(self._name, self._path["test"] + "/../GT")
 
         # done
         assert len(self._eval_groundtruth_clips) == len(self._eval_groundtruth_frames)
@@ -548,3 +562,23 @@ def load_groundtruth_Avenue(path, n_clip):
         abnormal_frames = np.where(n_bin > 0)[0]
         groundtruth.append(get_segments(abnormal_frames))
     return groundtruth
+
+
+def load_groundtruth_ShanghaiTech(path, n_clip):
+    groundtruth = []
+    files = sorted(glob.glob("%s/*.npy" % path))
+    assert len(files) == n_clip
+    for i in range(n_clip):
+        frame_labels = np.load(files[i])
+        groundtruth.append(frame_labels)
+    return groundtruth
+
+
+def load_groundtruth_Traffic_Train_and_Belleview(dataset_name, path):
+    assert dataset_name in ("Belleview", "Train")
+    frames_range = (300, 2918) if dataset_name == "Belleview" else (13840, 18000)
+    files = ["%s/gt-%s.png" % (path, str(i).zfill(5)) for i in range(frames_range[0], frames_range[1])]
+    groundtruth = np.array([np.sum(cv2.imread(file)/255.) for file in files])
+    groundtruth[groundtruth > 0.] = 1.
+    assert len(np.unique(groundtruth)) == 2
+    return [np.array(groundtruth)]

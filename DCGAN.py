@@ -50,14 +50,22 @@ class Discriminator(nn.Module):
 
 # name: dataset's name
 class DCGAN(object):
-    def __init__(self, name, im_size, store_path, keep_prob=0.3, device_str=None, use_progress_bar=True):
-        self.keep_prob = keep_prob
+    def __init__(self, name, im_size, store_path, extension_params, training_gamma=0.9, drop_prob=0.3, device_str=None,
+                 use_progress_bar=True, prt_summary=False):
+        self.drop_prob = drop_prob
         self.use_progress_bar = use_progress_bar
         #
         self.name = name
         self.im_size = im_size
+        self.training_gamma = training_gamma
         # paths
-        self.store_path = os.path.join(store_path, self.name)
+        str_extension = "RNN_%d_cat_%d_elenorm_%d_sigmoid_%d_gamma_%s_chanorm_%d" % (int("RNN" in extension_params),
+                                                                                     int("cat_latent" in extension_params),
+                                                                                     int("element_norm" in extension_params),
+                                                                                     int("sigmoid_instead_tanh" in extension_params),
+                                                                                     "auto" if training_gamma < 0 else "%.2f" % training_gamma,
+                                                                                     int("channel_norm" in extension_params))
+        self.store_path = os.path.join(store_path, self.name, str_extension)
         self.input_store_path = self.store_path + "/input_data_%s_%s" \
             % (str(self.im_size[0]).zfill(3), str(self.im_size[1]).zfill(3))  # data for training and evaluation
         self.training_store_path = self.input_store_path + "/training"
@@ -75,7 +83,7 @@ class DCGAN(object):
             self.device = torch.device(device_str)
 
         print("DCGAN init...")
-        self.G = Generator(self.im_size, self.device, self.keep_prob)
+        self.G = Generator(self.im_size, self.device, self.drop_prob, extension_params, prt_summary=prt_summary)
         self.D = Discriminator(self.im_size, self.device)
         self.loss = nn.BCEWithLogitsLoss()  # BCEWithLogitsLoss replacing BCELoss
 
@@ -105,6 +113,7 @@ class DCGAN(object):
     def _load_model(self, G_model_filename, D_model_filename=None, G_optim_filename=None, D_optim_filename=None, silence=True):
         loaded_data = torch.load(os.path.join(self.model_store_path, G_model_filename))
         self.G.load_state_dict(loaded_data['G'])
+        self.G.set_W_softs(loaded_data['W_softs'])
         if not silence:
             print("Generator loaded from %s" % G_model_filename)
         if D_model_filename is not None:
@@ -123,7 +132,8 @@ class DCGAN(object):
 
     # save pretrained models and optimizers
     def _save_model(self, G_model_filename, D_model_filename=None, G_optim_filename=None, D_optim_filename=None, iter_count=None, silence=True):
-        torch.save({'G': self.G.state_dict(), 'iter': iter_count}, os.path.join(self.model_store_path, G_model_filename))
+        torch.save({'G': self.G.state_dict(), 'iter': iter_count, 'W_softs': self.G.get_W_softs()},
+                   os.path.join(self.model_store_path, G_model_filename))
         if not silence:
             print("Generator saved to %s" % G_model_filename)
         if D_model_filename is not None:
@@ -180,6 +190,7 @@ class DCGAN(object):
 
             # process each clip
             for clip_idx in clip_order:
+                self.G.reset_hidden_tensor()
                 dataset.load_data(clip_idx)
                 # >>>>>>>> TODO: check whether it is better if shuffle is True <<<<<<<<<
                 dataloader = torch.utils.data.DataLoader(dataset.data["train"], batch_size, shuffle=False)
@@ -208,7 +219,8 @@ class DCGAN(object):
                                             torch.ones_like(real_D_output_logit).to(self.device))
 
                     # get fake outputs from Generator
-                    frames_hat, flows_hat = self.G(frames)
+                    gamma = iter_count / (iter_count + 1) if self.training_gamma < 0 else self.training_gamma
+                    frames_hat, flows_hat = self.G(frames, gamma)   # default gamma is 0.9
 
                     # discriminator loss with fake data
                     fake_D_input = torch.cat([frames, flows_hat], dim=1)
@@ -299,6 +311,13 @@ class DCGAN(object):
                              "G_optim_epoch_%s.pkl" % str(epoch_end).zfill(LEN_ZFILL),
                              "D_optim_epoch_%s.pkl" % str(epoch_end).zfill(LEN_ZFILL),
                              iter_count=iter_count)
+            # Denormalize images and save them in grid
+            images_to_save = [images_restore(frames.data[0].cpu()),
+                              images_restore(frames_hat.data[0].cpu()),
+                              images_restore(flows.data[0].cpu(), is_optical_flow=True),
+                              images_restore(flows_hat.data[0].cpu(), is_optical_flow=True)]
+            grid = utils.make_grid(images_to_save, nrow=1)
+            utils.save_image(grid, "%s/gen_epoch_%s.png" % (self.gen_image_store_path, str(epoch_end).zfill(LEN_ZFILL)))
 
     # calculate output from pretrained model and store them to files
     # may feed training data to get losses as weights in evaluation
@@ -324,18 +343,20 @@ class DCGAN(object):
             frames, flows, frames_hat, flows_hat = None, None, None, None
             # process each clip
             for clip_idx in range(n_clip):
+                self.G.reset_hidden_tensor()
                 dataset.load_data(clip_idx)
                 dataloader = torch.utils.data.DataLoader(dataset.data[part], batch_size, shuffle=False)
 
                 output_frames, output_flows = [], []
 
                 # evaluate a batch
+                gamma = 1.
                 for data_batch in dataloader:
                     frames = data_batch[:, :3, :, :].to(self.device) / 255.  # eval ALL video frames
                     frames *= 2.
                     frames -= 1.
                     flows = extend_flow_channel_in_batch(data_batch[:, 3:, :, :])
-                    frames_hat, flows_hat = self.G(frames)
+                    frames_hat, flows_hat = self.G(frames, gamma)
 
                     # store results
                     output_frames.append(frames_hat.cpu().numpy())
@@ -462,10 +483,12 @@ class DCGAN(object):
 
         # return auc(s)
         dataset = DatasetDefiner(self.name, self.im_size, self.evaluation_store_path, mode="test")
-        auc_frames_norm = dataset.evaluate(frames_scores, normalize_each_clip=True)
-        auc_frames = dataset.evaluate(frames_scores, normalize_each_clip=False)
-        auc_flows_norm = dataset.evaluate(flows_scores, normalize_each_clip=True)
-        auc_flows = dataset.evaluate(flows_scores, normalize_each_clip=False)
-        auc_sum_norm = dataset.evaluate(sum_scores, normalize_each_clip=True)
-        auc_sum = dataset.evaluate(sum_scores, normalize_each_clip=False)
-        return auc_frames_norm, auc_frames, auc_flows_norm, auc_flows, auc_sum_norm, auc_sum
+        auc_frames_norm, aPR_frames_norm = dataset.evaluate(frames_scores, normalize_each_clip=True)
+        auc_frames, aPR_frames = dataset.evaluate(frames_scores, normalize_each_clip=False)
+        auc_flows_norm, aPR_flows_norm = dataset.evaluate(flows_scores, normalize_each_clip=True)
+        auc_flows, aPR_flows = dataset.evaluate(flows_scores, normalize_each_clip=False)
+        auc_sum_norm, aPR_sum_norm = dataset.evaluate(sum_scores, normalize_each_clip=True)
+        auc_sum, aPR_sum = dataset.evaluate(sum_scores, normalize_each_clip=False)
+        AUCs = [auc_frames_norm, auc_frames, auc_flows_norm, auc_flows, auc_sum_norm, auc_sum]
+        aPRs = [aPR_frames_norm, aPR_frames, aPR_flows_norm, aPR_flows, aPR_sum_norm, aPR_sum]
+        return AUCs, aPRs
