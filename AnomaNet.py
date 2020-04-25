@@ -290,9 +290,10 @@ class AnomaNet(nn.Module):
                 print(param_tensor, "\t", self.state_dict()[param_tensor].size())
 
     def reset_hidden_tensor(self):
-        RNN_input_size = (self.IM_SIZE[0]//16, self.IM_SIZE[1]//16)
-        self.RNN_hidden_tensor = torch.autograd.Variable(
-            torch.zeros(1, self.latent_channel, RNN_input_size[0], RNN_input_size[1])).to(self.device)
+        if self.use_RNN:
+            RNN_input_size = (self.IM_SIZE[0]//16, self.IM_SIZE[1]//16)
+            self.RNN_hidden_tensor = torch.autograd.Variable(
+                torch.zeros(1, self.latent_channel, RNN_input_size[0], RNN_input_size[1])).to(self.device)
 
     def set_W_softs(self, W_softs):
         assert len(W_softs) == 5

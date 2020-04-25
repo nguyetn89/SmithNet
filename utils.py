@@ -49,6 +49,20 @@ def image_from_flow(in_flow, channel_first):
     return out_image.astype(np.float32)
 
 
+def visualize_error_map(error_map, channel_first=True):
+    if isinstance(error_map, torch.Tensor):
+        min_func, max_func = torch.min, torch.max
+    else:   # expect numpy array
+        min_func, max_func = np.min, np.max
+    if channel_first:
+        for i in range(error_map.shape[0]):
+            error_map[i] = (error_map[i] - min_func(error_map[i])) / (max_func(error_map[i]) - min_func(error_map[i]))
+    else:
+        for i in range(error_map.shape[-1]):
+            error_map[..., i] = (error_map[..., i] - min_func(error_map[..., i])) / (max_func(error_map[..., i]) - min_func(error_map[..., i]))
+    return error_map
+
+
 # this function focuses on two types of input:
 #   + image: input range [-1, 1]
 #   + flow: input range [any, any]

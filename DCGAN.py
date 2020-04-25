@@ -7,8 +7,9 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torchvision import utils
 from torch.utils.tensorboard import SummaryWriter
+from skimage.measure import compare_ssim as ssim
 
-from utils import get_img_shape, image_gradient, images_restore, ProgressBar, DatasetDefiner, extend_flow_channel_in_batch
+from utils import get_img_shape, image_gradient, images_restore, ProgressBar, DatasetDefiner, extend_flow_channel_in_batch, visualize_error_map
 from AnomaNet import AnomaNet as Generator
 from CONFIG import loss_weights
 
@@ -293,8 +294,11 @@ class DCGAN(object):
                 # Denormalize images and save them in grid
                 images_to_save = [images_restore(frames.data[0].cpu()),
                                   images_restore(frames_hat.data[0].cpu()),
+                                  visualize_error_map((images_restore(frames.data[0].cpu()) - images_restore(frames_hat.data[0].cpu()))**2),
                                   images_restore(flows.data[0].cpu(), is_optical_flow=True),
-                                  images_restore(flows_hat.data[0].cpu(), is_optical_flow=True)]
+                                  images_restore(flows_hat.data[0].cpu(), is_optical_flow=True),
+                                  visualize_error_map((images_restore(flows.data[0].cpu(), is_optical_flow=True) -
+                                                       images_restore(flows_hat.data[0].cpu(), is_optical_flow=True))**2)]
                 grid = utils.make_grid(images_to_save, nrow=1)
                 utils.save_image(grid, "%s/gen_epoch_%s.png" % (self.gen_image_store_path, str(epoch + 1).zfill(LEN_ZFILL)))
 
@@ -314,8 +318,11 @@ class DCGAN(object):
             # Denormalize images and save them in grid
             images_to_save = [images_restore(frames.data[0].cpu()),
                               images_restore(frames_hat.data[0].cpu()),
+                              visualize_error_map((images_restore(frames.data[0].cpu()) - images_restore(frames_hat.data[0].cpu()))**2),
                               images_restore(flows.data[0].cpu(), is_optical_flow=True),
-                              images_restore(flows_hat.data[0].cpu(), is_optical_flow=True)]
+                              images_restore(flows_hat.data[0].cpu(), is_optical_flow=True),
+                              visualize_error_map((images_restore(flows.data[0].cpu(), is_optical_flow=True) -
+                                                   images_restore(flows_hat.data[0].cpu(), is_optical_flow=True))**2)]
             grid = utils.make_grid(images_to_save, nrow=1)
             utils.save_image(grid, "%s/gen_epoch_%s.png" % (self.gen_image_store_path, str(epoch_end).zfill(LEN_ZFILL)))
 
@@ -375,8 +382,12 @@ class DCGAN(object):
                 # save example image
                 images_to_save = [images_restore(frames.data[0].cpu().numpy()),
                                   images_restore(frames_hat.data[0].cpu().numpy()),
+                                  visualize_error_map((images_restore(frames.data[0].cpu().numpy()) -
+                                                       images_restore(frames_hat.data[0].cpu().numpy()))**2),
                                   images_restore(flows.data[0].cpu().numpy(), is_optical_flow=True),
-                                  images_restore(flows_hat.data[0].cpu().numpy(), is_optical_flow=True)]
+                                  images_restore(flows_hat.data[0].cpu().numpy(), is_optical_flow=True),
+                                  visualize_error_map((images_restore(flows.data[0].cpu().numpy(), is_optical_flow=True) -
+                                                       images_restore(flows_hat.data[0].cpu().numpy(), is_optical_flow=True))**2)]
                 grid = utils.make_grid([torch.tensor(image) for image in images_to_save], nrow=1)
                 out_file = os.path.join(out_path, '%s.png' % str(clip_idx + 1).zfill(len(str(n_clip))))
                 utils.save_image(grid, out_file)
@@ -388,6 +399,19 @@ class DCGAN(object):
         if progress is not None:
             progress.done()
         print("Finished time:", datetime.datetime.now())
+
+    # SSIM on input and reconstructed frames
+    def _calc_score_SSIM(self, data):
+        # extract data
+        frames, frames_hat, _, _ = data
+        if isinstance(frames, torch.Tensor):
+            frames = frames.cpu().numpy()
+        if isinstance(frames_hat, torch.Tensor):
+            frames_hat = frames_hat.cpu().numpy()
+        SSIM_scores = [ssim(np.transpose(frame, (1, 2, 0)), np.transpose(frame_hat, (1, 2, 0)),
+                            data_range=np.max([frame, frame_hat]) - np.min([frame, frame_hat]), multichannel=True)
+                       for (frame, frame_hat) in zip(frames, frames_hat)]
+        return np.array(SSIM_scores)
 
     # function for computing anomaly score from [frames, frames_hat, flows, flows_hat]
     # each input tensor shape: (n, C, H, W)
@@ -430,7 +454,7 @@ class DCGAN(object):
         self._create_path(out_path)
         out_file = os.path.join(out_path, 'scores.npy')
         # check whether file existed
-        if os.path.exists(out_file):
+        if os.path.exists(out_file) and not force_calc:
             scores = np.load(out_file, allow_pickle=True).item()
         else:
             scores = {}
@@ -441,7 +465,7 @@ class DCGAN(object):
         # calculate new results
         dataset = DatasetDefiner(self.name, self.im_size, self.evaluation_store_path, mode=part)
         n_clip = dataset.get_n_clip(part)
-        frames_scores, flows_scores = [], []
+        frames_scores, flows_scores, SSIM_scores = [], [], []
 
         for clip_idx in range(n_clip):
             dataset.load_data(clip_idx)
@@ -458,16 +482,21 @@ class DCGAN(object):
             tmp_frames_scores, tmp_flows_scores = self._calc_score(data, patch_size, stride, power)
             frames_scores.append(tmp_frames_scores)
             flows_scores.append(tmp_flows_scores)
+            if self.name in ("Belleview", "Train"):
+                tmp_SSIM_scores = self._calc_score_SSIM(data)
+                SSIM_scores.append(tmp_SSIM_scores)
 
         scores[key] = {"frame": frames_scores, "flow": flows_scores}
+        if len(SSIM_scores) > 0:
+            scores[key]["SSIM"] = SSIM_scores
         np.save(out_file, scores)
         return scores[key]
 
     # evaluation from frame-level groundtruth and (real eval data, output eval data)
-    def evaluate(self, epoch, patch_size, stride, power, use_weight=True):
+    def evaluate(self, epoch, patch_size, stride, power, use_weight=True, force_calc=False):
         # load weights for summation of frame and flow scores
         if use_weight:
-            training_scores = self.calc_raw_scores(epoch, "train", patch_size, stride, power)
+            training_scores = self.calc_raw_scores(epoch, "train", patch_size, stride, power, force_calc=force_calc)
             weights = (1./np.mean(np.concatenate(training_scores["frame"])),
                        1./np.mean(np.concatenate(training_scores["flow"])))
             print("Loaded weights:", weights)
@@ -476,7 +505,7 @@ class DCGAN(object):
         const_lambda = 0.2   # lambda in ICCV paper
 
         # load scores of test set
-        test_scores = self.calc_raw_scores(epoch, "test", patch_size, stride, power)
+        test_scores = self.calc_raw_scores(epoch, "test", patch_size, stride, power, force_calc=force_calc)
         frames_scores, flows_scores = test_scores["frame"], test_scores["flow"]
         sum_scores = [const_lambda*np.log(weights[0]*frame_scores) + np.log(weights[1]*flow_scores)
                       for (frame_scores, flow_scores) in zip(frames_scores, flows_scores)]
@@ -491,4 +520,8 @@ class DCGAN(object):
         auc_sum, aPR_sum = dataset.evaluate(sum_scores, normalize_each_clip=False)
         AUCs = [auc_frames_norm, auc_frames, auc_flows_norm, auc_flows, auc_sum_norm, auc_sum]
         aPRs = [aPR_frames_norm, aPR_frames, aPR_flows_norm, aPR_flows, aPR_sum_norm, aPR_sum]
+        if "SSIM" in test_scores:
+            auc_SSIM_norm, aPR_SSIM_norm = dataset.evaluate(test_scores["SSIM"], normalize_each_clip=True)
+            auc_SSIM, aPR_SSIM = dataset.evaluate(test_scores["SSIM"], normalize_each_clip=False)
+            print("SSIM: AUC = %.4f (norm), %.4f | aPR = %.4f (norm), %.4f" % (auc_SSIM_norm, auc_SSIM, aPR_SSIM_norm, aPR_SSIM))
         return AUCs, aPRs
