@@ -430,24 +430,37 @@ class DatasetDefiner():
     # clip_results must be an array of arrays (either numpy or torch tensor)
     def evaluate(self, clip_results_raw, normalize_each_clip):
         assert len(clip_results_raw) == self._n_clip["test"]
+
+        # manual evaluation for Subway datasets
+        if self._name in ("Entrance", "Exit"):
+            print("Manual evaluation is required due to the missing of frame-level groundtruth!")
+            return None, None
+
         clip_results = copy.deepcopy(clip_results_raw)
+
+        # set frame groundtruths
         if self._name in ("ShanghaiTech", "Belleview", "Train"):
             groundtruths = self._eval_groundtruth_frames
             assert len(clip_results) == len(groundtruths)
             assert all([len(clip_result) == len(groundtruth) for (clip_result, groundtruth) in zip(clip_results, groundtruths)])
-        else:
+        elif self._name in ("UCSDped2", "Avenue"):
             groundtruths = [np.zeros_like(clip_result) for clip_result in clip_results]
             # set frame-level groundtruth scores
-            for clip_idx in range(len(self._eval_groundtruth_clips)):
-                anomaly_intervals = self._eval_groundtruth_frames[clip_idx]
+            for idx, clip_idx in enumerate(self._eval_groundtruth_clips):
+                anomaly_intervals = self._eval_groundtruth_frames[idx]
                 for i in range(len(anomaly_intervals)//2):
                     # -1 because _eval_groundtruth_frames given in 1-based index
                     start = anomaly_intervals[2*i] - 1
                     end = anomaly_intervals[2*i+1] - 1
                     groundtruths[clip_idx][start:end] = 1
-                if normalize_each_clip:
-                    clip_results[clip_idx] = \
-                        (clip_results[clip_idx] - 0*min(clip_results[clip_idx]))/(max(clip_results[clip_idx]) - 0*min(clip_results[clip_idx]))
+        else:
+            print("Unimplemented dataset (%s)" % self._name)
+
+        if normalize_each_clip:
+            for clip_idx in range(self._n_clip["test"]):
+                clip_results[clip_idx] = \
+                    (clip_results[clip_idx] - 0*min(clip_results[clip_idx]))/(max(clip_results[clip_idx]) - 0*min(clip_results[clip_idx]))
+
         # flatten groundtruth and predicted scores for evaluation
         true_results = np.concatenate(groundtruths, axis=0)
         pred_results = np.concatenate(clip_results, axis=0)
@@ -468,6 +481,11 @@ class DatasetDefiner():
             self._path = {"train": info["training_path"], "test": info["evaluation_path"]}
             self._eval_groundtruth_frames = info["eval_groundtruth_frames"]
             self._eval_groundtruth_clips = info["eval_groundtruth_clips"]
+            #
+            #print("Dataset info:")
+            #print(self._n_clip)
+            #print(self._extension)
+            #print(self._path)
         else:
             raise ValueError("Unknown dataset")
 
@@ -483,7 +501,8 @@ class DatasetDefiner():
                 load_groundtruth_Traffic_Train_and_Belleview(self._name, self._path["test"] + "/../GT")
 
         # done
-        assert len(self._eval_groundtruth_clips) == len(self._eval_groundtruth_frames)
+        if self._name not in ("Entrance", "Exit"):
+            assert len(self._eval_groundtruth_clips) == len(self._eval_groundtruth_frames)
 
     def get_n_clip(self, part):
         assert part in ("train", "test")

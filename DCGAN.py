@@ -10,7 +10,7 @@ from torch.utils.tensorboard import SummaryWriter
 from skimage.measure import compare_ssim as ssim
 
 from utils import get_img_shape, image_gradient, images_restore, ProgressBar, DatasetDefiner, extend_flow_channel_in_batch, visualize_error_map
-from AnomaNet import AnomaNet as Generator
+from SmithNet import SmithNet as Generator
 from CONFIG import loss_weights
 
 LEN_ZFILL = 5
@@ -60,12 +60,16 @@ class DCGAN(object):
         self.im_size = im_size
         self.training_gamma = training_gamma
         # paths
-        str_extension = "RNN_%d_cat_%d_elenorm_%d_sigmoid_%d_gamma_%s_chanorm_%d" % (int("RNN" in extension_params),
-                                                                                     int("cat_latent" in extension_params),
-                                                                                     int("element_norm" in extension_params),
-                                                                                     int("sigmoid_instead_tanh" in extension_params),
-                                                                                     "auto" if training_gamma < 0 else "%.2f" % training_gamma,
-                                                                                     int("channel_norm" in extension_params))
+        str_extension = "RNN_%d_cat_%d_elenorm_%d_sigmoid_%d_gamma_%s_chanorm_%d_withReLU_%d_skipBlocks_%s" % \
+            (int("RNN" in extension_params),
+             int("cat_latent" in extension_params),
+             int("element_norm" in extension_params),
+             int("sigmoid_instead_tanh" in extension_params),
+             "auto" if training_gamma < 0 else "%.2f" % training_gamma,
+             int("channel_norm" in extension_params),
+             int("relu_chanorm" in extension_params),
+             extension_params[0][5:])
+
         self.store_path = os.path.join(store_path, self.name, str_extension)
         self.input_store_path = self.store_path + "/input_data_%s_%s" \
             % (str(self.im_size[0]).zfill(3), str(self.im_size[1]).zfill(3))  # data for training and evaluation
@@ -506,6 +510,9 @@ class DCGAN(object):
 
         # load scores of test set
         test_scores = self.calc_raw_scores(epoch, "test", patch_size, stride, power, force_calc=force_calc)
+        if self.name in ("Entrance", "Exit"):
+            return "manual", "manual"
+
         frames_scores, flows_scores = test_scores["frame"], test_scores["flow"]
         sum_scores = [const_lambda*np.log(weights[0]*frame_scores) + np.log(weights[1]*flow_scores)
                       for (frame_scores, flow_scores) in zip(frames_scores, flows_scores)]

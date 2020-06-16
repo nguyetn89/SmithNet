@@ -79,7 +79,7 @@ class adapted_Inception(nn.Module):
 # conv-batchnorm-lRelu
 class EncodingBlock(nn.Module):
     def __init__(self, output_size, conv_params, use_batchnorm, slope,
-                 per_element_norm, sigmoid_instead_tanh, per_channel_norm, device):
+                 per_element_norm, sigmoid_instead_tanh, per_channel_norm, ReLU_before_channel_norm, device):
         super().__init__()
         self.device = device
         self.use_batchnorm = use_batchnorm
@@ -103,6 +103,7 @@ class EncodingBlock(nn.Module):
         # channel-normalization
         if self.use_channel_norm:
             self.channel_norm = nn.AvgPool2d(output_size)
+            self.ReLU_channel_norm = nn.ReLU() if ReLU_before_channel_norm else None
 
         # normalize number of channels for block output
         self.n_stream = 1 + int(self.use_element_norm) + int(self.use_channel_norm)    # 3 streams
@@ -135,11 +136,14 @@ class EncodingBlock(nn.Module):
             self.W_soft = repackage_hidden(self.W_soft)
             self.W_soft *= gamma
             self.W_soft += (1-gamma) * torch.mean(W, 0, keepdim=True)
-            element_norm_output = self.W_soft * W
+            element_norm_output = self.W_soft * output
 
         # stream of channel norm
         if self.use_channel_norm:
-            channel_weights = self.channel_norm(output)
+            if self.ReLU_channel_norm is None:
+                channel_weights = self.channel_norm(output)
+            else:
+                channel_weights = self.channel_norm(self.ReLU_channel_norm(output))
             channel_norm_output = channel_weights * output
 
         # concatenate multiple streams
@@ -177,8 +181,8 @@ class DecodingBlock(nn.Module):
         return self.network(x)
 
 
-# extension_params: ["skip:x-x-x", "RNN", "cat_latent", "element_norm", "sigmoid_instead_tanh", "channel_norm"]
-class AnomaNet(nn.Module):
+# extension_params: ["skip:x-x-x", "RNN", "cat_latent", "element_norm", "sigmoid_instead_tanh", "channel_norm", "relu_chanorm"]
+class SmithNet(nn.Module):
     def __init__(self, im_size, device, drop_prob, extension_params, prt_summary=True):
         super().__init__()
         # set device & input shape
@@ -193,6 +197,7 @@ class AnomaNet(nn.Module):
         self.use_element_norm = "element_norm" in extension_params
         self.use_sigmoid_instead_tanh = "sigmoid_instead_tanh" in extension_params
         self.use_channel_norm = "channel_norm" in extension_params
+        self.use_ReLU_before_channel_norm = "relu_chanorm" in extension_params
         self.skip_blocks = [int(block) for block in extension_params[0][5:].split('-')] if "-" in extension_params[0][5:] else []
         #
         n_filter = 64
@@ -211,6 +216,7 @@ class AnomaNet(nn.Module):
                                          per_element_norm=self.use_element_norm if 1 not in self.skip_blocks else False,
                                          sigmoid_instead_tanh=self.use_sigmoid_instead_tanh,
                                          per_channel_norm=self.use_channel_norm if 1 not in self.skip_blocks else False,
+                                         ReLU_before_channel_norm=self.use_ReLU_before_channel_norm if 1 not in self.skip_blocks else False,
                                          device=self.device)
         self.enc_block_2 = EncodingBlock((self.IM_SIZE[0]//2, self.IM_SIZE[1]//2),
                                          [n_filter, n_filter*2, kernel_size, 2, padding],
@@ -219,6 +225,7 @@ class AnomaNet(nn.Module):
                                          per_element_norm=self.use_element_norm if 2 not in self.skip_blocks else False,
                                          sigmoid_instead_tanh=self.use_sigmoid_instead_tanh,
                                          per_channel_norm=self.use_channel_norm if 2 not in self.skip_blocks else False,
+                                         ReLU_before_channel_norm=self.use_ReLU_before_channel_norm if 2 not in self.skip_blocks else False,
                                          device=self.device)
         self.enc_block_3 = EncodingBlock((self.IM_SIZE[0]//4, self.IM_SIZE[1]//4),
                                          [n_filter*2, n_filter*4, kernel_size, 2, padding],
@@ -227,6 +234,7 @@ class AnomaNet(nn.Module):
                                          per_element_norm=self.use_element_norm if 3 not in self.skip_blocks else False,
                                          sigmoid_instead_tanh=self.use_sigmoid_instead_tanh,
                                          per_channel_norm=self.use_channel_norm if 3 not in self.skip_blocks else False,
+                                         ReLU_before_channel_norm=self.use_ReLU_before_channel_norm if 3 not in self.skip_blocks else False,
                                          device=self.device)
         self.enc_block_4 = EncodingBlock((self.IM_SIZE[0]//8, self.IM_SIZE[1]//8),
                                          [n_filter*4, n_filter*8, kernel_size, 2, padding],
@@ -235,6 +243,7 @@ class AnomaNet(nn.Module):
                                          per_element_norm=self.use_element_norm if 4 not in self.skip_blocks else False,
                                          sigmoid_instead_tanh=self.use_sigmoid_instead_tanh,
                                          per_channel_norm=self.use_channel_norm if 4 not in self.skip_blocks else False,
+                                         ReLU_before_channel_norm=self.use_ReLU_before_channel_norm if 4 not in self.skip_blocks else False,
                                          device=self.device)
         self.enc_block_5 = EncodingBlock((self.IM_SIZE[0]//16, self.IM_SIZE[1]//16),
                                          [n_filter*8, n_filter*8, kernel_size, 2, padding],
@@ -243,6 +252,7 @@ class AnomaNet(nn.Module):
                                          per_element_norm=self.use_element_norm if 5 not in self.skip_blocks else False,
                                          sigmoid_instead_tanh=self.use_sigmoid_instead_tanh,
                                          per_channel_norm=self.use_channel_norm if 5 not in self.skip_blocks else False,
+                                         ReLU_before_channel_norm=self.use_ReLU_before_channel_norm if 5 not in self.skip_blocks else False,
                                          device=self.device)
 
         # decoding frame

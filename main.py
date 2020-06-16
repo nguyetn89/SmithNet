@@ -57,6 +57,8 @@ def run(params):
         extension_params.append("sigmoid_instead_tanh")
     if params["chanorm"] != 0:
         extension_params.append("channel_norm")
+    if params["relu_chanorm"] != 0:
+        extension_params.append("relu_chanorm")
     # init model controller
     if method == "WGAN":
         # controller = WGAN_GP(dataset, im_size, store_path)
@@ -112,6 +114,7 @@ if __name__ == "__main__":
     parser.add_argument("--sigmoid_instead_tanh", type=int, default=0)
     parser.add_argument("--training_gamma", type=float, default=-1)
     parser.add_argument("--chanorm", type=int, default=1)
+    parser.add_argument("--relu_chanorm", type=int, default=1)
     parser.add_argument("--skip_blocks", type=str, default="none")
     parser.add_argument("--task", type=str, default=None)
     parser.add_argument("--subset", type=str, default="test")
