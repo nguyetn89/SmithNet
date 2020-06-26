@@ -136,7 +136,7 @@ class EncodingBlock(nn.Module):
             self.W_soft = repackage_hidden(self.W_soft)
             self.W_soft *= gamma
             self.W_soft += (1-gamma) * torch.mean(W, 0, keepdim=True)
-            element_norm_output = self.W_soft * output
+            element_norm_output = self.W_soft * W
 
         # stream of channel norm
         if self.use_channel_norm:
