@@ -3,8 +3,6 @@ import argparse
 import torch
 import numpy as np
 
-# from WGAN import WGAN_GP
-# from NoGan import NoGAN
 from DCGAN import DCGAN
 from CONFIG import data_info
 

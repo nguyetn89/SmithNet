@@ -458,8 +458,7 @@ class DatasetDefiner():
 
         if normalize_each_clip:
             for clip_idx in range(self._n_clip["test"]):
-                clip_results[clip_idx] = \
-                    (clip_results[clip_idx] - 0*min(clip_results[clip_idx]))/(max(clip_results[clip_idx]) - 0*min(clip_results[clip_idx]))
+                clip_results[clip_idx] /= max(clip_results[clip_idx])
 
         # flatten groundtruth and predicted scores for evaluation
         true_results = np.concatenate(groundtruths, axis=0)
@@ -482,10 +481,10 @@ class DatasetDefiner():
             self._eval_groundtruth_frames = info["eval_groundtruth_frames"]
             self._eval_groundtruth_clips = info["eval_groundtruth_clips"]
             #
-            #print("Dataset info:")
-            #print(self._n_clip)
-            #print(self._extension)
-            #print(self._path)
+            # print("Dataset info:")
+            # print(self._n_clip)
+            # print(self._extension)
+            # print(self._path)
         else:
             raise ValueError("Unknown dataset")
 
