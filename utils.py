@@ -405,7 +405,7 @@ class DatasetDefiner():
 
         assert name in ("UCSDped1", "UCSDped2",
                         "Avenue", "Entrance", "Exit",
-                        "ShanghaiTech", "Crime",
+                        "ShanghaiTech", "UCF_Crime",
                         "Belleview", "Train",
                         "just4test")
         # set basic attributes
@@ -425,11 +425,12 @@ class DatasetDefiner():
                                          self._n_clip[part], out_path=self._data_path,
                                          extension=self._extension)
         self.data[part].set_clip_idx(clip_idx)
+        return self.data[part]._in_data_paths[clip_idx]
 
     # clip_results: sequence of anomaly scores (clips) for the whole test set
     # clip_results must be an array of arrays (either numpy or torch tensor)
     def evaluate(self, clip_results_raw, normalize_each_clip):
-        assert len(clip_results_raw) == self._n_clip["test"]
+        assert self._name == "UCF_Crime" or len(clip_results_raw) == self._n_clip["test"]
 
         # manual evaluation for Subway datasets
         if self._name in ("Entrance", "Exit"):
@@ -453,11 +454,34 @@ class DatasetDefiner():
                     start = anomaly_intervals[2*i] - 1
                     end = anomaly_intervals[2*i+1] - 1
                     groundtruths[clip_idx][start:end] = 1
+        elif self._name == "UCF_Crime":
+            n_clip = self.get_n_clip("test")
+            allowed_videos = sorted(list(self._eval_groundtruth_frames.keys()))
+            video_lengths = {}
+            count = 0
+            for clip_idx in range(n_clip):
+                file_path = self.load_data(clip_idx)
+                _, file_name = os.path.split(file_path)
+                if not any (x in file_name for x in allowed_videos):
+                    continue
+                key = [x for x in allowed_videos if x in file_name][0]
+                video_lengths[key] = video_lengths.get(key, 0) + len(clip_results[count])
+                count += 1
+            #
+            groundtruths = [np.zeros(video_lengths[key], dtype=int) for key in allowed_videos]
+            # set frame-level groundtruth scores
+            for idx, key in enumerate(allowed_videos):
+                anomaly_intervals = self._eval_groundtruth_frames[key]
+                for i in range(len(anomaly_intervals)//2):
+                    # -1 because _eval_groundtruth_frames given in 1-based index
+                    start = anomaly_intervals[2*i] - 1
+                    end = anomaly_intervals[2*i+1] - 1
+                    groundtruths[idx][start:end] = 1
         else:
-            print("Unimplemented dataset (%s)" % self._name)
+            raise NotImplementedError("Unimplemented dataset (%s)" % self._name)
 
         if normalize_each_clip:
-            for clip_idx in range(self._n_clip["test"]):
+            for clip_idx in range(len(clip_results)):
                 clip_results[clip_idx] /= max(clip_results[clip_idx])
 
         # flatten groundtruth and predicted scores for evaluation
@@ -498,9 +522,12 @@ class DatasetDefiner():
         elif self._name in ("Belleview", "Train"):
             self._eval_groundtruth_frames = \
                 load_groundtruth_Traffic_Train_and_Belleview(self._name, self._path["test"] + "/../GT")
+        elif self._name == "UCF_Crime":
+            groundtruth_file = info["groundtruth_path"] + "/Temporal_Anomaly_Annotation_for_Testing_Videos.txt"
+            self._eval_groundtruth_frames = load_groundtruth_UCF_Crime(groundtruth_file)
 
         # done
-        if self._name not in ("Entrance", "Exit"):
+        if self._name not in ("Entrance", "Exit", "UCF_Crime"):
             assert len(self._eval_groundtruth_clips) == len(self._eval_groundtruth_frames)
 
     def get_n_clip(self, part):
@@ -603,6 +630,21 @@ def load_groundtruth_ShanghaiTech(path, n_clip):
     for i in range(n_clip):
         frame_labels = np.load(files[i])
         groundtruth.append(frame_labels)
+    return groundtruth
+
+
+def load_groundtruth_UCF_Crime(txt_file_path):
+    with open(txt_file_path, 'r') as reader:
+        lines = reader.read().split("\n")
+    groundtruth = {}
+    for line in lines:
+        values = line.split()
+        if len(values) < 4:
+            continue
+        key = values[0].replace("_x264.mp4", "")
+        groundtruth[key] = [int(values[2]), int(values[3])]
+        if int(values[4]) != -1:
+            groundtruth[key] += [int(values[4]), int(values[5])]
     return groundtruth
 
 

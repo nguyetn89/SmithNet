@@ -2,7 +2,7 @@ import numpy as np
 
 loss_weights = {"g_loss": 0.25, "frame": 1., "flow": 2.}
 
-common_path = "./datasets"
+common_path = "/project/def-jeandiro/nguyetn/datasets"
 
 UCSDped2 = {
     "n_clip_train": 16,
@@ -79,14 +79,15 @@ ShanghaiTech = {
     "eval_groundtruth_clips": np.arange(107)
 }
 
-Crime = {
-    "n_clip_train": None,
-    "n_clip_test": None,
+UCF_Crime = {
+    "n_clip_train": 1806,   #1806 Beluga, 1806 Cedar
+    "n_clip_test": 1328,
     "extension": ".npy",
-    "training_path": None,
-    "evaluation_path": None,
+    "training_path": "/scratch/nguyetn/UCF_Crime/tmp/anomaly_detection/clips/Train",
+    "evaluation_path": "/scratch/nguyetn/UCF_Crime/tmp/anomaly_detection/clips/Test",
+    "groundtruth_path": "/scratch/nguyetn/UCF_Crime/tmp/anomaly_detection/annotation",
     "eval_groundtruth_frames": None,
-    "eval_groundtruth_clips": None
+    "eval_groundtruth_clips": np.arange(1328)
 }
 
 Belleview = {
@@ -117,7 +118,7 @@ data_info = {
     "Entrance": Entrance,
     "Exit": Exit,
     "ShanghaiTech": ShanghaiTech,
-    "Crime": Crime,
+    "UCF_Crime": UCF_Crime,
     "Belleview": Belleview,
     "Train": Train
 }

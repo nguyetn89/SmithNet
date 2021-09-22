@@ -1,5 +1,6 @@
 import os
 import datetime
+import glob
 import numpy as np
 import torch
 import torch.nn as nn
@@ -134,6 +135,36 @@ class DCGAN(object):
             if not silence:
                 print("D_optimizer loaded from %s" % D_optim_filename)
         return loaded_data['iter']
+    
+    def _load_last_checkpoint(self, load_D_model=False, load_G_optim=False, load_D_optim=False):
+        G_model_files = sorted(glob.glob(f"{self.model_store_path}/G_model_checkpoint_*.pkl"))
+        n = len(G_model_files)
+        if n == 0:
+            return
+        G_model_filename = os.path.split(G_model_files[-1])[1]
+        #
+        D_model_filename = None
+        if load_D_model:
+            D_model_files = sorted(glob.glob(f"{self.model_store_path}/D_model_checkpoint_*.pkl"))
+            if len(D_model_files) > 0:
+                assert len(D_model_files) == n
+                D_model_filename = os.path.split(D_model_files[-1])[1]
+        #
+        G_optim_filename = None
+        if load_G_optim:
+            G_optim_files = sorted(glob.glob(f"{self.model_store_path}/G_optim_checkpoint_*.pkl"))
+            if len(G_optim_files) > 0:
+                assert len(G_optim_files) == n
+                G_optim_filename = os.path.split(G_optim_files[-1])[1]
+        #
+        D_optim_filename = None
+        if load_D_optim:
+            D_optim_files = sorted(glob.glob(f"{self.model_store_path}/D_optim_checkpoint_*.pkl"))
+            if len(D_optim_files) > 0:
+                assert len(D_optim_files) == n
+                D_optim_filename = os.path.split(D_optim_files[-1])[1]
+        #
+        self._load_model(G_model_filename, D_model_filename, G_optim_filename, D_optim_filename)
 
     # save pretrained models and optimizers
     def _save_model(self, G_model_filename, D_model_filename=None, G_optim_filename=None, D_optim_filename=None, iter_count=None, silence=True):
@@ -153,8 +184,58 @@ class DCGAN(object):
             torch.save(self.g_optimizer.state_dict(), os.path.join(self.model_store_path, G_optim_filename))
             if not silence:
                 print("G_optimizer saved to %s" % G_optim_filename)
+    
+    def _save_checkpoint(self, n_max_check_points,
+                         save_D_model=False, save_G_optim=False, save_D_optim=False, iter_count=None):
+        G_model_files = sorted(glob.glob(f"{self.model_store_path}/G_model_checkpoint_*.pkl"))
+        if len(G_model_files) == n_max_check_points:
+            checkpoint = n_max_check_points - 1
+            # remove oldest checkpoint and rename others
+            os.remove(G_model_files[0])
+            for i in range(1, len(G_model_files)):
+                os.rename(G_model_files[i], G_model_files[i-1])
+            #
+            if save_D_model:
+                D_model_files = sorted(glob.glob(f"{self.model_store_path}/D_model_checkpoint_*.pkl"))
+                assert len(D_model_files) == n_max_check_points
+                os.remove(D_model_files[0])
+                for i in range(1, len(D_model_files)):
+                    os.rename(D_model_files[i], D_model_files[i-1])
+            #
+            if save_G_optim:
+                G_optim_files = sorted(glob.glob(f"{self.model_store_path}/G_optim_checkpoint_*.pkl"))
+                assert len(G_optim_files) == n_max_check_points
+                os.remove(G_optim_files[0])
+                for i in range(1, len(G_optim_files)):
+                    os.rename(G_optim_files[i], G_optim_files[i-1])
+            #
+            if save_D_optim:
+                D_optim_files = sorted(glob.glob(f"{self.model_store_path}/D_optim_checkpoint_*.pkl"))
+                assert len(D_optim_files) == n_max_check_points
+                os.remove(D_optim_files[0])
+                for i in range(1, len(D_optim_files)):
+                    os.rename(D_optim_files[i], D_optim_files[i-1])
+        else:
+            checkpoint = len(G_model_files)
+        #
+        G_model_filename = f"G_model_checkpoint_{checkpoint}.pkl"
+        #
+        D_model_filename = None
+        if save_D_model:
+            D_model_filename = f"D_model_checkpoint_{checkpoint}.pkl"
+        #
+        G_optim_filename = None
+        if save_G_optim:
+            G_optim_filename = f"G_optim_checkpoint_{checkpoint}.pkl"
+        #
+        D_optim_filename = None
+        if save_D_optim:
+            D_optim_filename = f"D_optim_checkpoint_{checkpoint}.pkl"
+        #
+        self._save_model(G_model_filename, D_model_filename, G_optim_filename, D_optim_filename)
 
-    def train(self, epoch_start, epoch_end, batch_size=16, save_every_x_epochs=None):
+    def train(self, epoch_start, epoch_end, batch_size=16, save_every_x_epochs=None,
+              save_every_x_clips=15, n_max_check_points=5):
         # set mode for networks
         self.G.train()
         self.D.train()
@@ -166,6 +247,8 @@ class DCGAN(object):
             assert isinstance(iter_count, int)
         else:
             iter_count = 0
+            # try to load checkpoint
+            self._load_last_checkpoint(load_D_model=True, load_G_optim=True, load_D_optim=True)
 
         # turn on debugging related to gradient
         torch.autograd.set_detect_anomaly(True)
@@ -189,12 +272,12 @@ class DCGAN(object):
         # loop over epoch
         msg = ""
         for epoch in range(epoch_start, epoch_end):
-            np.random.seed(epoch)   # to make sure getting similar results when training from pretrained models
-            torch.manual_seed(epoch)
+            # np.random.seed(epoch)   # to make sure getting similar results when training from pretrained models
+            # torch.manual_seed(epoch)
             clip_order = np.random.permutation(n_clip)
 
             # process each clip
-            for clip_idx in clip_order:
+            for i, clip_idx in enumerate(clip_order):
                 self.G.reset_hidden_tensor()
                 dataset.load_data(clip_idx)
                 # >>>>>>>> TODO: check whether it is better if shuffle is True <<<<<<<<<
@@ -280,6 +363,23 @@ class DCGAN(object):
                     msg = " [(frame: %.2f, flow: %.2f, G_loss: %.2f), G_total: %.2f, D: %.2f]" \
                           % (frame_loss.data.item(), flow_loss.data.item(), g_loss.data.item(),
                              g_loss_total.data.item(), d_loss.data.item())
+
+                if save_every_x_clips and i % save_every_x_clips == 0:
+                    with open(f"{self.model_store_path}/clip_idx.txt", "a") as clip_idx_writer:
+                        clip_idx_writer.write(f"{datetime.datetime.now()}: clip {i}/{n_clip}\n")
+                    self._save_checkpoint(n_max_check_points, save_D_model=True,
+                                          save_G_optim=True, save_D_optim=True)
+                    # Denormalize images and save them in grid
+                    images_to_save = [images_restore(frames.data[0].cpu()),
+                                      images_restore(frames_hat.data[0].cpu()),
+                                      visualize_error_map((images_restore(frames.data[0].cpu()) - images_restore(frames_hat.data[0].cpu()))**2),
+                                      images_restore(flows.data[0].cpu(), is_optical_flow=True),
+                                      images_restore(flows_hat.data[0].cpu(), is_optical_flow=True),
+                                      visualize_error_map((images_restore(flows.data[0].cpu(), is_optical_flow=True) -
+                                                           images_restore(flows_hat.data[0].cpu(), is_optical_flow=True))**2)]
+                    grid = utils.make_grid(images_to_save, nrow=1)
+                    utils.save_image(grid, "%s/gen_%s.png" % (self.gen_image_store_path,
+                                                              str(datetime.datetime.now()).replace(" ", "_")))
 
                 if progress is not None:
                     progress.current += 1
@@ -471,8 +571,16 @@ class DCGAN(object):
         n_clip = dataset.get_n_clip(part)
         frames_scores, flows_scores, SSIM_scores = [], [], []
 
+        # skip some UCF_Crime clips since they do not have groundtruth
+        allowed_videos = None
+        if self.name == "UCF_Crime" and part == "test":
+            allowed_videos = sorted(list(dataset._eval_groundtruth_frames.keys()))
+
         for clip_idx in range(n_clip):
-            dataset.load_data(clip_idx)
+            file_path = dataset.load_data(clip_idx)
+            _, file_name = os.path.split(file_path)
+            if allowed_videos is not None and not any (x in file_name for x in allowed_videos):
+                continue
 
             # get input data
             frames = dataset.data[part][:][:, :3, :, :] / 127.5 - 1.
@@ -497,7 +605,7 @@ class DCGAN(object):
         return scores[key]
 
     # evaluation from frame-level groundtruth and (real eval data, output eval data)
-    def evaluate(self, epoch, patch_size, stride, power, use_weight=True, force_calc=False):
+    def evaluate(self, epoch, patch_size, stride, power, const_lambda=0.2, use_weight=True, force_calc=False):
         # load weights for summation of frame and flow scores
         if use_weight:
             training_scores = self.calc_raw_scores(epoch, "train", patch_size, stride, power, force_calc=force_calc)
@@ -506,7 +614,7 @@ class DCGAN(object):
             print("Loaded weights:", weights)
         else:
             weights = (1., 1.)
-        const_lambda = 0.2   # lambda in ICCV paper
+        # const_lambda = 0.2   # lambda in ICCV paper
 
         # load scores of test set
         test_scores = self.calc_raw_scores(epoch, "test", patch_size, stride, power, force_calc=force_calc)

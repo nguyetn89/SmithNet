@@ -22,6 +22,7 @@ def print_params(params):
     print("skip extension for blocks: %s" % params["skip_blocks"])
     if params["task"] == "eval":
         print("power: %d | patch: %d | stride: %d" % (params["power"], params["patch"], params["stride"]))
+    print("const_lambda:", params.get("const_lambda"))
 
 
 def get_epoch_info(epoch_str):
@@ -92,8 +93,9 @@ def run(params):
         power = params["power"]
         patch_size = params["patch"]
         stride = params["stride"]
-        print("Epoch %d" % epoch_eval)
-        AUCs, aPRs = controller.evaluate(epoch_eval, patch_size, stride, power)
+        const_lambda = params["const_lambda"]
+        print(f"Epoch {epoch_eval} with const_lambda = {const_lambda}")
+        AUCs, aPRs = controller.evaluate(epoch_eval, patch_size, stride, power, const_lambda=const_lambda)
         print("Epoch", epoch_eval)
         print("AUCs:", AUCs)
         print("aPRs:", aPRs)
@@ -125,6 +127,7 @@ if __name__ == "__main__":
     parser.add_argument("--power", type=int, default=2)
     parser.add_argument("--patch", type=int, default=5)
     parser.add_argument("--stride", type=int, default=1)
+    parser.add_argument("--const_lambda", type=float, default=0.2)
     parser.add_argument("--print", type=int, default=1)
     parser.add_argument("--prt_summary", type=int, default=0)
     args = vars(parser.parse_args())
